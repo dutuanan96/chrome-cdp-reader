@@ -3,7 +3,6 @@ CLI Interface for chrome-cdp-reader
 """
 
 import click
-import json
 import sys
 
 try:
@@ -60,7 +59,7 @@ def read(target: str, search: str, wait: int):
         # Display results
         click.echo(f"\nTitle: {result.get('title', 'N/A')}")
         click.echo(f"URL: {result.get('url', 'N/A')}")
-        click.echo(f"\nContent:")
+        click.echo("\nContent:")
         click.echo("-" * 50)
         click.echo(result.get('text', 'No content')[:2000])
         
@@ -132,14 +131,14 @@ def status():
     
     # Cookie status
     cookie_status = cookie_mgr.get_status()
-    click.echo(f"\nCookie Manager:")
+    click.echo("\nCookie Manager:")
     click.echo(f"  Windows user: {cookie_status['win_user']}")
     click.echo(f"  Default profile exists: {cookie_status['default_exists']}")
     click.echo(f"  Debug profile exists: {cookie_status['debug_exists']}")
     
     # Chrome status
     chrome_status = launcher.get_status()
-    click.echo(f"\nChrome Launcher:")
+    click.echo("\nChrome Launcher:")
     click.echo(f"  Debug port: {chrome_status['debug_port']}")
 
 

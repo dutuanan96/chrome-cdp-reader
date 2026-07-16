@@ -4,8 +4,6 @@ Cookie Manager - Copy cookies from default Chrome profile to debug profile
 
 import os
 import shutil
-import platform
-from pathlib import Path
 from typing import Optional
 
 from chrome_cdp_reader.utils import detect_windows_user

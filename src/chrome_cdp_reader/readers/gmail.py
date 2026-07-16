@@ -2,7 +2,7 @@
 Gmail Reader
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 
 class GmailReader:

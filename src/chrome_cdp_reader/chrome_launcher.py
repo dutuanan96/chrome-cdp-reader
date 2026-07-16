@@ -2,7 +2,6 @@
 Chrome Launcher - Launch Chrome with debug mode enabled
 """
 
-import os
 import subprocess
 import time
 from typing import Optional
@@ -60,7 +59,7 @@ class ChromeLauncher:
         try:
             if only_debug_profile:
                 # Kill only the process listening on the debug port (netstat + taskkill by PID)
-                out = subprocess.run(
+                subprocess.run(
                     ["cmd.exe", "/c",
                      f"for /f \"tokens=5\" %p in ('netstat -ano ^| findstr :{self.debug_port} ^| findstr LISTENING') do taskkill /F /PID %p"],
                     capture_output=True, timeout=15

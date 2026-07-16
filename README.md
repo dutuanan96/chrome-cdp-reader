@@ -91,9 +91,6 @@ crc read https://example.com
 # Take a screenshot
 crc screenshot https://example.com --output screenshot.png
 
-# Interactive mode
-crc interactive
-
 # Check connection status
 crc status
 ```
@@ -123,13 +120,17 @@ crc status
 │  │ Chrome (Debug Mode)                                 │   │
 │  │                                                     │   │
 │  │   --remote-debugging-port=9222                      │   │
-│  │   --remote-allow-origins=*                          │   │
 │  │   --user-data-dir=C:\chrome-debug-profile           │   │
 │  │                                                     │   │
 │  │   Cookies copied from default profile               │   │
+│  │   (Login Data / passwords intentionally excluded)   │   │
 │  │   → Gmail, Zalo, Facebook... already logged in     │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
+│  Security note: by default Chrome's Origin-check stays ON    │
+│  (no --remote-allow-origins=*). The CDP port is only        │
+│  reachable from localhost (WSL mirrored networking), not     │
+│  from the public internet.                                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -174,24 +175,22 @@ from chrome_cdp_reader import ChromeReader
 # Initialize reader
 reader = ChromeReader()
 
-# Read any page
+# Read any page — returns a dict with title, url, text, links, images
 content = reader.read("https://gmail.com")
-print(content.text)
+print(content["title"])
+print(content["text"][:500])
+print(f"{len(content['links'])} links found")
 
-# Read Gmail
+# Read Gmail (returns the same dict shape, navigated to inbox)
 gmail = reader.read_gmail()
-for email in gmail.inbox:
-    print(f"From: {email.sender}")
-    print(f"Subject: {email.subject}")
-    print(f"Snippet: {email.snippet}")
+print(gmail["url"])  # mail.google.com inbox URL
 
 # Take screenshot
 reader.screenshot("https://example.com", output="screenshot.png")
 
 # Read Zalo
 zalo = reader.read_zalo()
-for conv in zalo.conversations:
-    print(f"{conv.name}: {conv.last_message}")
+print(zalo["text"][:500])
 ```
 
 ## 🛠️ Tech Stack
