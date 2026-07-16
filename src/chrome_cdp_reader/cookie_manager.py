@@ -8,6 +8,8 @@ import platform
 from pathlib import Path
 from typing import Optional
 
+from chrome_cdp_reader.utils import detect_windows_user
+
 
 class CookieManager:
     """
@@ -30,7 +32,7 @@ class CookieManager:
             win_user: Windows username (auto-detected if None)
             debug_profile_name: Name of the debug profile directory
         """
-        self.win_user = win_user or self._detect_windows_user()
+        self.win_user = win_user or detect_windows_user()
         self.debug_profile_name = debug_profile_name
         
         # Paths
@@ -39,21 +41,9 @@ class CookieManager:
         self.debug_profile = f"{self.win_home}/{debug_profile_name}/Default"
         
     def _detect_windows_user(self) -> str:
-        """Detect Windows username from WSL."""
-        try:
-            # Try to read from /mnt/c/Users
-            users_dir = "/mnt/c/Users"
-            if os.path.exists(users_dir):
-                users = [u for u in os.listdir(users_dir) 
-                        if not u.startswith('.') and u not in ['Public', 'Default', 'Default User']]
-                if users:
-                    return users[0]
-        except Exception:
-            pass
-        
-        # Fallback to environment variable
-        return os.environ.get("WIN_USER", "HP")
-    
+        """Deprecated: use chrome_cdp_reader.utils.detect_windows_user instead."""
+        return detect_windows_user()
+
     def create_debug_profile(self) -> bool:
         """
         Create debug profile directory structure.
@@ -77,9 +67,7 @@ class CookieManager:
         """
         files_to_copy = [
             "Cookies",
-            "Login Data",
             "Preferences",
-            "Web Data",
             "Local State"
         ]
         
@@ -108,7 +96,7 @@ class CookieManager:
             Dictionary with verification results
         """
         results = {}
-        files_to_check = ["Cookies", "Login Data", "Preferences"]
+        files_to_check = ["Cookies", "Preferences", "Local State"]
         
         for filename in files_to_check:
             path = f"{self.debug_profile}/{filename}"

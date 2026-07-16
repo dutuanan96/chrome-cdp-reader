@@ -6,9 +6,15 @@ import click
 import json
 import sys
 
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("chrome-cdp-reader")
+except Exception:
+    __version__ = "1.1.0"
+
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="chrome-cdp-reader")
+@click.version_option(version=__version__, prog_name="chrome-cdp-reader")
 def cli():
     """
     chrome-cdp-reader - Read your logged-in websites from WSL via Chrome DevTools Protocol

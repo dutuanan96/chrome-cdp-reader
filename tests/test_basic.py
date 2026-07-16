@@ -84,4 +84,6 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(cli, ['--version'])
         assert result.exit_code == 0
-        assert "0.1.0" in result.output
+        # version must match the package version (single source of truth)
+        from chrome_cdp_reader import __version__
+        assert __version__ in result.output

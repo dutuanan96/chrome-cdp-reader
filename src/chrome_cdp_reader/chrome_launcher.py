@@ -7,6 +7,8 @@ import subprocess
 import time
 from typing import Optional
 
+from chrome_cdp_reader.utils import detect_windows_user
+
 
 class ChromeLauncher:
     """
@@ -22,7 +24,8 @@ class ChromeLauncher:
         win_user: Optional[str] = None,
         debug_port: int = 9222,
         debug_profile_name: str = "chrome-debug-profile",
-        chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        allow_all_origins: bool = False
     ):
         """
         Initialize ChromeLauncher.
@@ -33,37 +36,41 @@ class ChromeLauncher:
             debug_profile_name: Name of the debug profile directory
             chrome_path: Path to Chrome executable
         """
-        self.win_user = win_user or self._detect_windows_user()
+        self.win_user = win_user or detect_windows_user()
         self.debug_port = debug_port
         self.debug_profile_name = debug_profile_name
         self.chrome_path = chrome_path
+        self.allow_all_origins = allow_all_origins
         
     def _detect_windows_user(self) -> str:
-        """Detect Windows username from WSL."""
-        try:
-            users_dir = "/mnt/c/Users"
-            if os.path.exists(users_dir):
-                users = [u for u in os.listdir(users_dir) 
-                        if not u.startswith('.') and u not in ['Public', 'Default', 'Default User']]
-                if users:
-                    return users[0]
-        except Exception:
-            pass
-        return os.environ.get("WIN_USER", "HP")
-    
-    def kill_chrome(self) -> bool:
+        """Deprecated: use chrome_cdp_reader.utils.detect_windows_user instead."""
+        return detect_windows_user()
+
+    def kill_chrome(self, only_debug_profile: bool = True) -> bool:
         """
-        Kill all Chrome processes.
-        
+        Kill Chrome processes.
+
+        By default (only_debug_profile=True) only the Chrome instance bound to
+        the debug port is killed, leaving other Chrome windows untouched.
+        Pass only_debug_profile=False to kill every chrome.exe (legacy).
+
         Returns:
             True if successful
         """
         try:
-            subprocess.run(
-                ["taskkill.exe", "/F", "/IM", "chrome.exe"],
-                capture_output=True,
-                timeout=10
-            )
+            if only_debug_profile:
+                # Kill only the process listening on the debug port (netstat + taskkill by PID)
+                out = subprocess.run(
+                    ["cmd.exe", "/c",
+                     f"for /f \"tokens=5\" %p in ('netstat -ano ^| findstr :{self.debug_port} ^| findstr LISTENING') do taskkill /F /PID %p"],
+                    capture_output=True, timeout=15
+                )
+            else:
+                # Legacy: kill ALL Chrome (use with care)
+                subprocess.run(
+                    ["taskkill.exe", "/F", "/IM", "chrome.exe"],
+                    capture_output=True, timeout=10
+                )
             time.sleep(2)
             return True
         except Exception as e:
@@ -85,9 +92,14 @@ class ChromeLauncher:
         args = [
             self.chrome_path,
             f"--remote-debugging-port={self.debug_port}",
-            "--remote-allow-origins=*",
             f"--user-data-dir={debug_profile_path}"
         ]
+        
+        # SECURITY: only enable --remote-allow-origins=* when explicitly requested
+        # (e.g. cross-origin extension use). Default keeps Chrome's Origin-check
+        # active to prevent arbitrary web pages from hijacking the CDP port.
+        if self.allow_all_origins:
+            args.append("--remote-allow-origins=*")
         
         if headless:
             args.append("--headless=new")

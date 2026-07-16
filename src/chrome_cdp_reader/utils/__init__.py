@@ -3,6 +3,7 @@ WSL Network Utilities
 """
 
 import json
+import os
 from urllib.request import urlopen
 from urllib.error import URLError
 from typing import Dict, Any
@@ -58,4 +59,23 @@ def get_tabs(port: int = 9222) -> list:
         return []
 
 
-__all__ = ["check_cdp_connection", "get_tabs"]
+__all__ = ["check_cdp_connection", "get_tabs", "detect_windows_user"]
+
+
+def detect_windows_user() -> str:
+    """
+    Detect the Windows username from WSL's mounted C:/Users directory.
+
+    Returns:
+        Windows username, or "HP" fallback via WIN_USER env var.
+    """
+    try:
+        users_dir = "/mnt/c/Users"
+        if os.path.exists(users_dir):
+            users = [u for u in os.listdir(users_dir)
+                     if not u.startswith('.') and u not in ['Public', 'Default', 'Default User']]
+            if users:
+                return users[0]
+    except Exception:
+        pass
+    return os.environ.get("WIN_USER", "HP")
