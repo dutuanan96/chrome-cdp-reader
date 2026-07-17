@@ -41,26 +41,29 @@ class CookieManager:
         self.win_user = win_user or detect_windows_user()
         self.debug_profile_name = debug_profile_name
 
-        # Windows path to the dedicated debug profile.
-        self.debug_profile = f"C:\\Users\\{self.win_user}\\{debug_profile_name}"
+        # Windows path passed to Chrome (--user-data-dir). Chrome creates it.
+        self.windows_profile = f"C:\\Users\\{self.win_user}\\{debug_profile_name}"
+        # WSL/Linux path used by this package to check/create the directory
+        # from inside WSL (os.makedirs does NOT understand C:\Users\...).
+        self.wsl_profile = f"/mnt/c/Users/{self.win_user}/{debug_profile_name}"
 
     def create_debug_profile(self) -> bool:
         """
-        Create the dedicated debug profile directory structure.
+        Create the dedicated debug profile directory (from WSL side).
 
         Returns:
             True if the directory exists (created or already present)
         """
         try:
-            os.makedirs(self.debug_profile, exist_ok=True)
-            return os.path.isdir(self.debug_profile)
+            os.makedirs(self.wsl_profile, exist_ok=True)
+            return os.path.isdir(self.wsl_profile)
         except Exception as e:
             print(f"Error creating debug profile: {e}")
             return False
 
     def profile_exists(self) -> bool:
-        """Return True if the debug profile directory already exists."""
-        return os.path.isdir(self.debug_profile)
+        """Return True if the debug profile directory exists (WSL side)."""
+        return os.path.isdir(self.wsl_profile)
 
     def get_status(self) -> dict:
         """
@@ -71,7 +74,8 @@ class CookieManager:
         """
         return {
             "win_user": self.win_user,
-            "debug_profile": self.debug_profile,
+            "windows_profile": self.windows_profile,
+            "wsl_profile": self.wsl_profile,
             "exists": self.profile_exists(),
         }
 

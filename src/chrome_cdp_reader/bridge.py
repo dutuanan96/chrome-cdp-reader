@@ -91,8 +91,15 @@ class ChromeReader:
         return None
 
     def _connect(self, ws_url: str, timeout: int = 15) -> websocket.WebSocket:
-        """Connect to a WebSocket URL."""
-        return websocket.create_connection(ws_url, timeout=timeout)
+        """
+        Connect to a WebSocket URL.
+
+        suppress_origin=True: websocket-client sends an `Origin` header by
+        default, which Chromium 147+ rejects (403) unless allowlisted. A
+        non-browser CDP client should suppress it — no --remote-allow-origins
+        flag needed, and it works for localhost / 127.0.0.1 / IPv6 alike.
+        """
+        return websocket.create_connection(ws_url, timeout=timeout, suppress_origin=True)
 
     def cdp_send(self, ws: websocket.WebSocket, method: str,
                  params: Optional[Dict] = None, timeout: int = 10) -> Dict:

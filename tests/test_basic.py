@@ -71,23 +71,16 @@ class TestChromeLauncher:
         launcher = ChromeLauncher(debug_port=9333)
         assert launcher.debug_port == 9333
 
-    def test_default_launch_args_allow_local_origin_only(self):
+    def test_default_launch_args_no_origin_flag(self):
         """
-        Regression test (Claude review + live 403): `crc setup` must allow the
-        local CDP client origin (http://127.0.0.1:9222) so Chrome 147+ does not
-        reject the WebSocket with 403. It must NOT use the wildcard * (which
-        would let any page in the debug profile drive CDP).
+        Regression (Claude + live 403): with suppress_origin=True in
+        _connect(), the launcher must NOT pass any --remote-allow-origins
+        flag. Chromium accepts the connection because the client suppresses
+        the Origin header (non-browser CDP client).
         """
         launcher = ChromeLauncher()
         args = launcher._build_launch_args()
-        assert "--remote-allow-origins=http://127.0.0.1:9222" in args
-        assert "--remote-allow-origins=*" not in args
-
-    def test_opt_in_wildcard_origin(self):
-        """allow_all_origins=True must add the wildcard flag explicitly."""
-        launcher = ChromeLauncher(allow_all_origins=True)
-        args = launcher._build_launch_args()
-        assert "--remote-allow-origins=*" in args
+        assert not any(a.startswith("--remote-allow-origins") for a in args)
 
 
 class TestCLI:
@@ -104,3 +97,31 @@ class TestCLI:
         # version must match the package version (single source of truth)
         from chrome_cdp_reader import __version__
         assert __version__ in result.output
+
+    def test_cli_status_no_keyerror(self):
+        """crc status must not raise KeyError (regression P0#2)."""
+        from click.testing import CliRunner
+        from chrome_cdp_reader.cli import cli
+
+        runner = CliRunner()
+        # Without Chrome, status still prints profile info (no exception)
+        result = runner.invoke(cli, ['status'])
+        assert result.exit_code == 0, result.output
+        assert "Debug Profile" in result.output
+
+    def test_gmail_search_url_encoded(self, monkeypatch):
+        """Production read_gmail must URL-encode the search query."""
+        from chrome_cdp_reader.bridge import ChromeReader
+        reader = ChromeReader()
+        captured = {}
+
+        def fake_read(url, wait=5):
+            captured["url"] = url
+            return {}
+
+        monkeypatch.setattr(reader, "read", fake_read)
+        reader.read_gmail("from:github work/foo#bar")
+        url = captured["url"]
+        assert "%2F" in url, "slash not encoded"
+        assert "%23" in url, "hash not encoded"
+        assert "work/foo#bar" not in url, "raw unsafe chars leaked"

@@ -49,13 +49,16 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
         click.echo("Run: crc setup", err=True)
         sys.exit(1)
 
-    click.echo(f"Reading {target}...")
+    if not as_json:
+        click.echo(f"Reading {target}...", err=True)
 
     try:
         if target.lower() == "gmail":
             result = reader.read_gmail(search=search)
         elif target.lower() == "zalo":
             result = reader.read_zalo()
+        elif target.lower() == "facebook":
+            result = reader.read("https://www.facebook.com/", wait=max(wait, 5))
         else:
             result = reader.read(target, wait=wait)
 
@@ -139,12 +142,13 @@ def status():
     except Exception:
         click.echo("✗ Cannot list tabs")
 
-    # Cookie status
+    # Cookie status (debug profile only — no cookie copy)
     cookie_status = cookie_mgr.get_status()
-    click.echo("\nCookie Manager:")
+    click.echo("\nDebug Profile:")
     click.echo(f"  Windows user: {cookie_status['win_user']}")
-    click.echo(f"  Default profile exists: {cookie_status['default_exists']}")
-    click.echo(f"  Debug profile exists: {cookie_status['debug_exists']}")
+    click.echo(f"  Profile (Windows): {cookie_status['windows_profile']}")
+    click.echo(f"  Profile (WSL): {cookie_status['wsl_profile']}")
+    click.echo(f"  Exists: {cookie_status['exists']}")
 
     # Chrome status
     chrome_status = launcher.get_status()

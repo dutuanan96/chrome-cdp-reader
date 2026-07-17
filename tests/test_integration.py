@@ -55,10 +55,3 @@ def test_screenshot_jpg_is_real_jpeg(tmp_path):
     with open(saved, "rb") as f:
         header = f.read(3)
     assert header.startswith(b"\xff\xd8\xff"), "file is not a real JPEG"
-
-
-def test_gmail_search_url_encoded():
-    from urllib.parse import quote
-    q = "from:github label:work/foo#bar"
-    url = f"https://mail.google.com/mail/u/0/#search/{quote(q, safe='')}"
-    assert "%23" in url and "%2F" in url  # '#' and '/' encoded

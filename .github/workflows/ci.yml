@@ -23,8 +23,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          pip install ruff
       - name: Ruff
-        run: ruff check src/ tests/ || true
+        run: ruff check src/ tests/
       - name: Pytest
         run: pytest -q

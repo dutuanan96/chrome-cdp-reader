@@ -23,7 +23,6 @@ class ChromeLauncher:
         debug_port: int = 9222,
         debug_profile_name: str = "chrome-debug-profile",
         chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        allow_all_origins: bool = False
     ):
         """
         Initialize ChromeLauncher.
@@ -38,7 +37,6 @@ class ChromeLauncher:
         self.debug_port = debug_port
         self.debug_profile_name = debug_profile_name
         self.chrome_path = chrome_path
-        self.allow_all_origins = allow_all_origins
 
     def _detect_windows_user(self) -> str:
         """Deprecated: use chrome_cdp_reader.utils.detect_windows_user instead."""
@@ -82,21 +80,18 @@ class ChromeLauncher:
         Build the Chrome command-line arguments for debug mode.
 
         SECURITY: Chrome 147+ enforces an Origin-check on the CDP WebSocket.
-        Without an allowlist, even the local client (origin
-        http://127.0.0.1:9222) is rejected with 403. We allow THAT specific
-        origin by default. The wildcard --remote-allow-origins=* is only added
-        when allow_all_origins=True (explicit opt-in, e.g. for a trusted
-        extension) — it would let any page in the debug profile drive CDP.
+        websocket-client sends an `Origin: http://127.0.0.1:9222` header by
+        default; Chromium rejects it unless the origin is allowlisted. Instead
+        of opening an allowlist, we suppress the Origin header entirely
+        (non-browser CDP client). No --remote-allow-origins flag needed, and
+        no mismatch whether the debugger URL is localhost / 127.0.0.1 / IPv6.
         """
         debug_profile_path = f"C:\\Users\\{self.win_user}\\{self.debug_profile_name}"
         args = [
             self.chrome_path,
             f"--remote-debugging-port={self.debug_port}",
             f"--user-data-dir={debug_profile_path}",
-            f"--remote-allow-origins=http://127.0.0.1:{self.debug_port}",
         ]
-        if self.allow_all_origins:
-            args.append("--remote-allow-origins=*")
         if headless:
             args.append("--headless=new")
         return args
