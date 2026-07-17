@@ -108,7 +108,7 @@ netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 con
 
 ## Debug Mode
 
-Enable debug logging:
+Enable debug logging (CDP commands sent/received are printed):
 
 ```bash
 export CRC_DEBUG=1

@@ -120,9 +120,17 @@ netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 con
 
 ## Security Considerations
 
-1. **Local Only**: CDP port is only accessible from localhost
-2. **Cookie Isolation**: Debug profile is separate from default profile
-3. **No Remote Access**: `--remote-allow-origins=*` only applies to localhost
+1. **Local Only**: CDP port listens on `127.0.0.1` (localhost). If you use
+   `netsh portproxy`, bind to `127.0.0.1` — never `0.0.0.0`.
+2. **Cookie Isolation**: Debug profile is separate from the default profile.
+   You log in once; cookies stay in the debug profile. No copying.
+3. **Origin check (WebSocket)**: By default Chrome rejects CDP WebSocket
+   connections whose `Origin` header is not in the allowlist. The flag
+   `--remote-allow-origins=*` disables that check, letting any page open in
+   the debug profile (ads, phishing, compromised sites) drive CDP. It is OFF
+   unless you pass `allow_all_origins=True` (e.g. for a trusted extension).
+   This is unrelated to "remote access" — the port is still localhost-only;
+   the flag governs which web pages may issue CDP commands.
 4. **User Control**: User must manually run setup scripts
 
 ## Error Handling

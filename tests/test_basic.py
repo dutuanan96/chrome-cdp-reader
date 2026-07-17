@@ -71,6 +71,22 @@ class TestChromeLauncher:
         launcher = ChromeLauncher(debug_port=9333)
         assert launcher.debug_port == 9333
 
+    def test_default_launch_args_no_wildcard_origin(self):
+        """
+        Regression test (Claude review): `crc setup` must NOT pass
+        --remote-allow-origins=* by default. Any page open in the debug
+        profile could otherwise drive CDP.
+        """
+        launcher = ChromeLauncher()
+        args = launcher._build_launch_args()
+        assert "--remote-allow-origins=*" not in args
+
+    def test_opt_in_wildcard_origin(self):
+        """allow_all_origins=True must add the flag explicitly."""
+        launcher = ChromeLauncher(allow_all_origins=True)
+        args = launcher._build_launch_args()
+        assert "--remote-allow-origins=*" in args
+
 
 class TestCLI:
     """Tests for CLI commands."""

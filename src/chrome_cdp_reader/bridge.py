@@ -1,16 +1,24 @@
 """
 Chrome CDP Bridge - Connect to Windows Chrome from WSL
-v1.1.0 — Fixed: auto-increment ID, drain loop, JPEG screenshots, error handling
+v1.2.0 — Security hardening: dedicated debug profile, no cookie copy,
+load-event waits, JPEG/PNG by extension, structured logging (CRC_DEBUG).
 """
 
 import json
 import time
 import base64
+import logging
+import os
 from typing import Optional, Dict, Any, List
 from urllib.request import urlopen
 from urllib.error import URLError
 
 import websocket
+
+logger = logging.getLogger("chrome_cdp_reader")
+if os.environ.get("CRC_DEBUG"):
+    logging.basicConfig(level=logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
 
 
 class CDPError(Exception):
@@ -104,6 +112,7 @@ class ChromeReader:
             "method": method,
             "params": params or {}
         }))
+        logger.debug("CDP send id=%s method=%s", msg_id, method)
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -148,8 +157,10 @@ class ChromeReader:
             raise ConnectionError("Cannot get WebSocket URL from Chrome")
 
         ws = self._connect(browser_ws)
-        result = self.cdp_send(ws, "Target.createTarget", {"url": url})
-        ws.close()
+        try:
+            result = self.cdp_send(ws, "Target.createTarget", {"url": url})
+        finally:
+            ws.close()
 
         target_id = result.get("targetId", "")
         if not target_id:

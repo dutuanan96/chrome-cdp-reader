@@ -77,6 +77,27 @@ class ChromeLauncher:
             print(f"Warning: Could not kill Chrome: {e}")
             return False
 
+    def _build_launch_args(self, headless: bool = False) -> list:
+        """
+        Build the Chrome command-line arguments for debug mode.
+
+        SECURITY: --remote-allow-origins=* is OFF by default. It is only added
+        when allow_all_origins=True (explicit opt-in, e.g. for a trusted
+        extension). The flag disables Chrome's Origin-check on the CDP
+        WebSocket, letting any page in the debug profile drive CDP.
+        """
+        debug_profile_path = f"C:\\Users\\{self.win_user}\\{self.debug_profile_name}"
+        args = [
+            self.chrome_path,
+            f"--remote-debugging-port={self.debug_port}",
+            f"--user-data-dir={debug_profile_path}"
+        ]
+        if self.allow_all_origins:
+            args.append("--remote-allow-origins=*")
+        if headless:
+            args.append("--headless=new")
+        return args
+
     def launch(self, headless: bool = False, timeout: int = 15) -> bool:
         """
         Launch Chrome with remote debugging.
@@ -88,22 +109,7 @@ class ChromeLauncher:
         Returns:
             True only if Chrome started AND CDP is reachable on the debug port.
         """
-        debug_profile_path = f"C:\\Users\\{self.win_user}\\{self.debug_profile_name}"
-
-        args = [
-            self.chrome_path,
-            f"--remote-debugging-port={self.debug_port}",
-            f"--user-data-dir={debug_profile_path}"
-        ]
-
-        # SECURITY: only enable --remote-allow-origins=* when explicitly requested
-        # (e.g. cross-origin extension use). Default keeps Chrome's Origin-check
-        # active to prevent arbitrary web pages from hijacking the CDP port.
-        if self.allow_all_origins:
-            args.append("--remote-allow-origins=*")
-
-        if headless:
-            args.append("--headless=new")
+        args = self._build_launch_args(headless=headless)
 
         try:
             # Launch Chrome via Windows
