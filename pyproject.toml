@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chrome-cdp-reader"
-version = "1.1.0"
+version = "1.2.0"
 description = "Read your logged-in websites from WSL via Chrome DevTools Protocol"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     { name = "dutuanan96", email = "dutuanan96@gmail.com" }
 ]
-keywords = ["chrome", "cdp", "wsl", "browser", "automation", "web-scraping"]
+keywords = ["chrome", "cdp", "wsl", "browser", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -36,6 +36,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "ruff>=0.4",
 ]
 
 [project.scripts]
@@ -51,3 +52,11 @@ packages = ["src/chrome_cdp_reader"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

@@ -70,49 +70,53 @@ pytest
 
 ## Project Structure
 
-```
+```text
 chrome-cdp-reader/
 ├── src/
 │   └── chrome_cdp_reader/
 │       ├── __init__.py
 │       ├── cli.py              # CLI interface
 │       ├── bridge.py           # CDP bridge
-│       ├── cookie_manager.py   # Cookie management
+│       ├── cookie_manager.py   # Debug profile directory helper
 │       ├── chrome_launcher.py  # Chrome launcher
-│       ├── readers/            # Site-specific readers
-│       └── utils/              # Utilities
-├── scripts/                    # Windows batch scripts
+│       ├── readers/            # Site reader wrappers (extensible)
+│       └── utils/              # Utilities (detect_windows_user)
 ├── tests/                      # Test files
 └── docs/                       # Documentation
 ```
 
-## Adding a New Site Reader
+## Adding a Site Reader
 
-1. Create a new file in `src/chrome_cdp_reader/readers/`
-2. Implement the reader class
-3. Add import in `readers/__init__.py`
-4. Add CLI command in `cli.py` if needed
-5. Update README.md with usage examples
+The CLI uses `ChromeReader` directly. The classes in `readers/` are thin
+wrappers today; a *real* reader should parse structured data instead of
+returning raw `document.body.innerText`.
 
-Example:
+1. Create a new file in `src/chrome_cdp_reader/readers/` (e.g. `mysite.py`).
+2. Implement a method that navigates + waits for the right selector, then
+   extracts a **typed schema** (list of dicts), not raw text.
+3. Add the class to `readers/__init__.py`.
+4. Add a CLI command in `cli.py` (or a shortcut in `ChromeReader`) if needed.
+5. Update README.md with usage examples.
+
+Example skeleton:
 
 ```python
-# src/chrome_cdp_reader/readers/my_site.py
-
-from typing import Dict, Any
-
+# src/chrome_cdp_reader/readers/mysite.py
+from typing import Dict, Any, List
 
 class MySiteReader:
-    """
-    Read MySite via Chrome CDP.
-    """
-    
+    """Read structured content from MySite via Chrome CDP."""
+
     def __init__(self, chrome_reader):
         self.reader = chrome_reader
-    
-    def read_content(self) -> Dict[str, Any]:
-        """Read content from MySite."""
-        return self.reader.read("https://mysite.com", wait=5)
+
+    def read_items(self) -> List[Dict[str, Any]]:
+        # 1. open / wait for load (ChromeReader.wait_for_load)
+        # 2. poll for the content selector (ChromeReader.wait_for_selector)
+        # 3. cdp_js to extract a typed list, e.g.:
+        #    [{ "title": ..., "url": ..., "author": ... }, ...]
+        result = self.reader.read("https://mysite.com")
+        return [{"raw_text": result.get("text", "")}]
 ```
 
 ## Questions?

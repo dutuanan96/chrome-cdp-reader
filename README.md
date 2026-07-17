@@ -1,43 +1,52 @@
 # chrome-cdp-reader
 
-**Read your logged-in websites from WSL via Chrome DevTools Protocol**
+**Read your logged-in websites from WSL via Chrome DevTools Protocol (CDP)**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%2B%20WSL2-lightgrey.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
 
+> **Status: Alpha** — a CDP reader for a *dedicated* Chrome debug profile.
+> Not a "read every logged-in site with one command" magic tool.
+
 ---
 
 ## What is this?
 
-`chrome-cdp-reader` lets you read content from websites you're already logged into — Gmail, Zalo, Facebook, Notion, GitHub... — directly from your WSL terminal. No re-authentication, no API keys, no browser extensions.
+`chrome-cdp-reader` connects from your WSL terminal to a **dedicated Chrome
+debug profile** running on Windows, and reads page content (text, links,
+images) or takes screenshots via the Chrome DevTools Protocol (CDP).
 
-It bridges the gap between WSL2 and Windows Chrome using the Chrome DevTools Protocol (CDP), with automatic cookie management and one-click setup.
+It does **NOT**:
+- copy cookies or passwords from your default Chrome profile,
+- use `--remote-allow-origins=*` by default,
+- expose the CDP port to the LAN.
 
-## Why?
+You log in **once** to the debug profile; cookies persist there for later runs.
 
-If you're a developer using WSL2, you've probably faced these problems:
+## Why a dedicated debug profile?
 
-1. **WSL2 can't access Windows localhost** — Network isolation makes CDP connections fail silently
-2. **Chrome debug mode is complex** — Port conflicts, profile setup, IPv6 changes in Chrome 147+
-3. **Cookie management is manual** — You need to copy cookies between profiles yourself
-4. **MCP servers don't auto-connect** — chrome-devtools-mcp fails from WSL without workarounds
+Chrome 136+ encrypts each profile with a **separate key**. Copying the cookie
+database from your default profile into a debug profile does **not** work —
+the debug profile cannot decrypt it. So instead we:
 
-**This tool solves all of these with a single command.**
+1. Create an empty debug profile (`C:\Users\<you>\chrome-debug-profile`).
+2. Launch Chrome on it with `--remote-debugging-port=9222`.
+3. You log in once. Cookies stay in that profile.
 
 ## ✨ Features
 
 | Feature | Description |
 |---------|-------------|
-| 🔌 **One-click setup** | `.bat` script configures Chrome debug mode automatically |
-| 🍪 **Cookie management** | Copies cookies from your default profile to debug profile |
-| 🌉 **WSL ↔ Windows bridge** | Handles mirrored networking, port conflicts, IPv6 changes |
-| 📖 **Read any page** | Extract text, links, images from any logged-in page |
-| 🤖 **Site-specific readers** | Pre-built readers for Gmail, Zalo, Facebook, Notion |
-| 🖼️ **Screenshot capture** | Save screenshots of any page |
-| 🔧 **CLI interface** | Simple commands: `crc read gmail`, `crc read <url>` |
-| 🐍 **Python library** | Import and use in your own scripts |
+| 🔌 **One command setup** | `crc setup` creates the debug profile and launches Chrome |
+| 🌉 **WSL ↔ Windows bridge** | Connects to `127.0.0.1:9222` (mirrored networking / portproxy) |
+| 📖 **Read any page** | Extract text, links, images from any page in the debug profile |
+| 🤖 **Site shortcuts** | `gmail`, `zalo`, `facebook` URL shortcuts (not full parsers) |
+| 🖼️ **Screenshot capture** | Save `.jpg` or `.png` (format chosen from the file extension) |
+| 🔧 **CLI interface** | `crc read gmail`, `crc read <url>`, `crc screenshot` |
+| 🐍 **Python library** | `from chrome_cdp_reader import ChromeReader` |
+| 🔒 **Safe by default** | No cookie copy, no password touch, localhost-only |
 
 ## 🚀 Quick Start
 
@@ -50,28 +59,25 @@ If you're a developer using WSL2, you've probably faced these problems:
 ### Installation
 
 ```bash
-# Install from PyPI (when published)
-pip install chrome-cdp-reader
-
-# Or install from source
 git clone https://github.com/dutuanan96/chrome-cdp-reader.git
 cd chrome-cdp-reader
 pip install -e .
 ```
 
-### Setup (Run once)
+### Setup (run once)
 
 ```bash
-# Run the setup script in Windows (via WSL)
-cmd.exe /c scripts\\setup-chrome.bat
+crc setup
 ```
 
 This will:
-1. Kill existing Chrome processes
-2. Create debug profile directory
-3. Copy cookies from your default profile
-4. Launch Chrome with CDP enabled
-5. Verify the connection
+1. Kill the Chrome instance bound to the debug port (other Chrome windows untouched).
+2. Create the **empty** debug profile directory.
+3. Launch Chrome on that profile with CDP enabled.
+4. Wait until CDP is reachable, then verify.
+
+On first launch, **log in once** to the sites you want to read. Cookies persist
+in the debug profile.
 
 ### Usage
 
@@ -79,8 +85,8 @@ This will:
 # Read Gmail inbox
 crc read gmail
 
-# Search Gmail
-crc read gmail --search "from:github"
+# Search Gmail (query is URL-encoded automatically)
+crc read gmail --search "from:github label:work"
 
 # Read Zalo messages
 crc read zalo
@@ -88,83 +94,28 @@ crc read zalo
 # Read any URL
 crc read https://example.com
 
-# Take a screenshot
-crc screenshot https://example.com --output screenshot.png
+# Limit printed text and output raw JSON
+crc read https://example.com --max-chars 2000 --json
 
-# Check connection status
+# Screenshot (format from extension: .jpg -> JPEG, .png -> PNG)
+crc screenshot https://example.com -o shot.png
+crc screenshot https://example.com -o shot.jpg
+
+# Check connection
 crc status
 ```
 
 ## 🏗️ How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ WSL2 (Ubuntu)                                               │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ chrome-cdp-reader                                   │   │
-│  │                                                     │   │
-│  │   1. Connect to localhost:9222                      │   │
-│  │   2. Create new tab / navigate                      │   │
-│  │   3. Extract content via JavaScript                 │   │
-│  │   4. Return structured data                         │   │
-│  └───────────────────────┬─────────────────────────────┘   │
-│                          │                                  │
-└──────────────────────────┼──────────────────────────────────┘
-                           │ WebSocket (CDP)
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Windows 11                                                  │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │ Chrome (Debug Mode)                                 │   │
-│  │                                                     │   │
-│  │   --remote-debugging-port=9222                      │   │
-│  │   --user-data-dir=C:\chrome-debug-profile           │   │
-│  │                                                     │   │
-│  │   Cookies copied from default profile               │   │
-│  │   (Login Data / passwords intentionally excluded)   │   │
-│  │   → Gmail, Zalo, Facebook... already logged in     │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                             │
-│  Security note: by default Chrome's Origin-check stays ON    │
-│  (no --remote-allow-origins=*). The CDP port is only        │
-│  reachable from localhost (WSL mirrored networking), not     │
-│  from the public internet.                                   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## 📦 Project Structure
-
-```
-chrome-cdp-reader/
-├── README.md                        # This file
-├── LICENSE                          # MIT License
-├── pyproject.toml                   # Python package config
-├── src/
-│   └── chrome_cdp_reader/
-│       ├── __init__.py             # Package version
-│       ├── cli.py                  # CLI interface (click)
-│       ├── bridge.py               # WSL ↔ Windows Chrome bridge
-│       ├── cookie_manager.py       # Cookie copy/management
-│       ├── chrome_launcher.py      # Chrome debug mode launcher
-│       ├── readers/                # Site-specific readers
-│       │   ├── __init__.py
-│       │   ├── gmail.py
-│       │   ├── zalo.py
-│       │   ├── facebook.py
-│       │   └── generic.py          # Generic page reader
-│       └── utils/
-│           ├── __init__.py
-│           └── ws_network.py       # WSL network utilities
-├── scripts/
-│   ├── setup-chrome.bat            # Windows: Setup Chrome debug mode
-│   └── copy-cookies.bat            # Windows: Copy cookies
-├── tests/
-│   └── test_basic.py
-└── docs/
-    ├── ARCHITECTURE.md
-    └── TROUBLESHOOTING.md
+WSL Python CLI (crc)
+      │  connect 127.0.0.1:9222
+Windows Chrome (debug profile)
+      ├── custom debug profile (C:\Users\<you>\chrome-debug-profile)
+      ├── you log in ONCE; cookies persist
+      ├── NO cookie / password copy
+      ├── NO wildcard origin (unless explicit)
+      └── NO LAN exposure (localhost only)
 ```
 
 ## 🔧 Python API
@@ -172,25 +123,13 @@ chrome-cdp-reader/
 ```python
 from chrome_cdp_reader import ChromeReader
 
-# Initialize reader
 reader = ChromeReader()
+content = reader.read("https://example.com")
+print(content["title"], len(content["text"]))
 
-# Read any page — returns a dict with title, url, text, links, images
-content = reader.read("https://gmail.com")
-print(content["title"])
-print(content["text"][:500])
-print(f"{len(content['links'])} links found")
-
-# Read Gmail (returns the same dict shape, navigated to inbox)
-gmail = reader.read_gmail()
-print(gmail["url"])  # mail.google.com inbox URL
-
-# Take screenshot
-reader.screenshot("https://example.com", output="screenshot.png")
-
-# Read Zalo
-zalo = reader.read_zalo()
-print(zalo["text"][:500])
+# Screenshot with explicit format
+reader.screenshot("https://example.com", output="shot.png")  # real PNG
+reader.screenshot("https://example.com", output="shot.jpg")  # real JPEG
 ```
 
 ## 🛠️ Tech Stack
@@ -198,60 +137,31 @@ print(zalo["text"][:500])
 - **Language:** Python 3.10+
 - **CDP Client:** websocket-client
 - **CLI:** click
-- **Network:** WSL2 mirrored networking
 - **Platform:** Windows 11 + WSL2 (Ubuntu)
+
+## 🔒 Security
+
+- **No cookie/password copy.** The debug profile is separate; you log in once.
+- **Localhost only.** CDP listens on `127.0.0.1`. If portproxy is needed, bind
+  to `127.0.0.1` (never `0.0.0.0`):
+  ```powershell
+  netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 connectport=9222 connectaddress=::1
+  ```
+- **No wildcard origin.** `--remote-allow-origins=*` is off unless you pass
+  `allow_all_origins=True` explicitly (e.g. for an extension).
+- CDP can read/control any tab in the debug profile — only use it on a profile
+  you control.
 
 ## 🗺️ Roadmap
 
-- [x] Phase 1: Core functionality (CDP bridge, cookie management, CLI)
-- [ ] Phase 2: Site-specific readers (Gmail, Zalo, Facebook, Notion)
-- [ ] Phase 3: Advanced features (MCP server, interactive mode, multi-tab)
-- [ ] Phase 4: Package publishing (PyPI)
-
-## 🐛 Troubleshooting
-
-### Chrome won't start with debug port
-
-Make sure no other Chrome instances are running:
-```bash
-taskkill.exe /F /IM chrome.exe
-```
-
-### WSL can't connect to localhost:9222
-
-1. Check if mirrored networking is enabled in `.wslconfig`:
-   ```ini
-   [wsl2]
-   networkingMode=mirrored
-   ```
-
-2. Restart WSL:
-   ```bash
-   wsl --shutdown
-   ```
-
-3. Verify Chrome is listening:
-   ```bash
-   curl http://localhost:9222/json/version
-   ```
-
-### Cookies not working
-
-Re-run the cookie copy script:
-```bash
-cmd.exe /c scripts\\copy-cookies.bat
-```
-
-### Chrome 147+ IPv6 issues
-
-Chrome 147+ binds CDP to IPv6 only. Use the setup script which handles this automatically, or manually:
-```powershell
-netsh interface portproxy add v4tov6 listenport=9222 listenaddress=0.0.0.0 connectport=9222 connectaddress=::1
-```
+- [x] CDP bridge with auto-increment ID + drain loop (reliable)
+- [x] JPEG/PNG screenshot by extension
+- [x] Dedicated debug profile (no cookie copy)
+- [ ] Structured site parsers (Gmail/Zalo/Facebook schema)
+- [ ] Integration tests against Chrome for Testing
+- [ ] PyPI publish + Beta status
 
 ## 🤝 Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 1. Fork the repository
 2. Create your feature branch (`git checkout -b feature/amazing-feature`)
@@ -261,20 +171,4 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) documentation
-- [WSL2 Mirrored Networking](https://learn.microsoft.com/en-us/windows/wsl/networking) guide
-- All contributors and testers
-
----
-
-<div align="center">
-
-**Made with ❤️ for the WSL developer community**
-
-[⬆ back to top](#chrome-cdp-reader)
-
-</div>
+MIT License — see [LICENSE](LICENSE).
