@@ -61,14 +61,10 @@ netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 con
 
 **Solutions:**
 
-1. Re-run cookie copy script:
-   ```bash
-   cmd.exe /c scripts\\copy-cookies.bat
-   ```
-
-2. Make sure Chrome is closed before copying cookies
-
-3. Check if cookies exist in debug profile:
+1. The debug profile is separate from your default profile — log in once in
+   the debug-profile Chrome window, then the session persists.
+2. Make sure Chrome debug is running (`crc status` shows "Connected").
+3. Check if the site session is still valid (re-log-in if expired):
    ```bash
    ls /mnt/c/Users/HP/chrome-debug-profile/Default/Cookies
    ```

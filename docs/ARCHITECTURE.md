@@ -35,7 +35,6 @@ Command-line interface providing:
 - `crc screenshot <url>` - Take a screenshot
 - `crc status` - Check connection status
 - `crc setup` - One-time setup
-- `crc cookies` - Manage cookies
 
 ### 5. Readers (readers/)
 
@@ -124,13 +123,12 @@ netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 con
    `netsh portproxy`, bind to `127.0.0.1` — never `0.0.0.0`.
 2. **Cookie Isolation**: Debug profile is separate from the default profile.
    You log in once; cookies stay in the debug profile. No copying.
-3. **Origin check (WebSocket)**: By default Chrome rejects CDP WebSocket
-   connections whose `Origin` header is not in the allowlist. The flag
-   `--remote-allow-origins=*` disables that check, letting any page open in
-   the debug profile (ads, phishing, compromised sites) drive CDP. It is OFF
-   unless you pass `allow_all_origins=True` (e.g. for a trusted extension).
-   This is unrelated to "remote access" — the port is still localhost-only;
-   the flag governs which web pages may issue CDP commands.
+3. **Origin check (WebSocket)**: Chrome 147+ rejects CDP WebSocket
+   connections that send an `Origin` header Chromium doesn't allowlist. The
+   client suppresses its Origin header (`suppress_origin=True`), so no
+   `--remote-allow-origins` flag is needed and the port stays localhost-only.
+   The wildcard `--remote-allow-origins=*` is never used (it would let any
+   page open in the debug profile drive CDP).
 4. **User Control**: User must manually run setup scripts
 
 ## Error Handling

@@ -10,6 +10,7 @@ import time
 import base64
 import logging
 import os
+from collections import deque
 from typing import Optional, Dict, Any, List
 from urllib.request import urlopen
 from urllib.error import URLError
@@ -102,13 +103,27 @@ class ChromeReader:
         """
         return websocket.create_connection(ws_url, timeout=timeout, suppress_origin=True)
 
+    def _get_event_queue(self, ws: websocket.WebSocket) -> "deque":
+        """Per-connection backlog of CDP events (messages without an id).
+
+        cdp_send() only returns responses whose id matches; events such as
+        Page.loadEventFired would otherwise be discarded. We buffer them here
+        so waiters like _wait_load_event can drain them without racing the
+        response-matching loop.
+        """
+        if not hasattr(ws, "_cdp_event_queue"):
+            ws._cdp_event_queue = deque()
+        return ws._cdp_event_queue
+
     def cdp_send(self, ws: websocket.WebSocket, method: str,
-                 params: Optional[Dict] = None, timeout: int = 10) -> Dict:
+                 params: Optional[Dict] = None, timeout: float = 10) -> Dict:
         """
         Send CDP command with auto-increment ID and drain loop.
 
         Fixes the id-collision bug: old code used hardcoded id=1,2,3
-        which broke when Chrome sent events between send/recv.
+        which broke when Chrome sent events between send/recv. Events
+        (messages without a matching id) are buffered in the per-connection
+        event queue instead of being discarded.
         """
         if not hasattr(ws, '_cdp_msg_id'):
             ws._cdp_msg_id = 0
@@ -134,6 +149,9 @@ class ChromeReader:
                 if "error" in msg:
                     raise CDPError(f"CDP error: {msg['error']}")
                 return msg.get("result", {})
+            # No matching id → it's an event; buffer it for waiters.
+            if msg.get("method"):
+                self._get_event_queue(ws).append(msg)
 
         raise CDPError(f"CDP method {method} timed out after {timeout}s")
 
@@ -223,54 +241,73 @@ class ChromeReader:
             navigate = True
 
         ws = self._connect(ws_url)
-        # 2. Enable events BEFORE navigating
-        self.cdp_send(ws, "Page.enable", timeout=5)
-        self.cdp_send(ws, "Runtime.enable", timeout=5)
+        deadline = time.monotonic() + timeout
 
-        # 3. Navigate exactly once (no reload)
-        if navigate:
-            self.cdp_send(ws, "Page.navigate", {"url": url}, timeout=10)
+        def remaining():
+            return max(0.0, deadline - time.monotonic())
 
-        # 4. Wait for load event by draining raw messages (only when we
-        #    actually navigated; a reused tab already at the URL is loaded).
-        if navigate:
-            load_ok = self._wait_load_event(ws, timeout=timeout)
-            if not load_ok:
-                ws.close()
+        try:
+            # 2. Enable events BEFORE navigating
+            self.cdp_send(ws, "Page.enable", timeout=min(5, remaining()))
+            self.cdp_send(ws, "Runtime.enable", timeout=min(5, remaining()))
+
+            # 3. Navigate exactly once (no reload)
+            if navigate:
+                self.cdp_send(ws, "Page.navigate", {"url": url},
+                              timeout=min(15, remaining()))
+
+            # 4. Wait for load event (only when we actually navigated).
+            if navigate:
+                load_ok = self._wait_load_event(ws, timeout=remaining())
+                if not load_ok:
+                    raise CDPError(
+                        f"Page did not fire loadEventFired for {url} "
+                        f"within {timeout}s"
+                    )
+
+            # 5. Poll readyState (must reach interactive/complete)
+            if not self._wait_ready_state(ws, timeout=remaining()):
                 raise CDPError(
-                    f"Page did not fire loadEventFired for {url} within {timeout}s"
+                    f"Page readyState never reached interactive/complete "
+                    f"for {url} within {timeout}s"
                 )
 
-        # 5. Poll readyState
-        self._wait_ready_state(ws, timeout=timeout)
-
-        # 6. Optional selector wait (SPA), with DOM fallback on timeout
-        if selector:
-            found = self.wait_for_selector(ws, selector, timeout=timeout)
-            if not found:
-                # Fallback: ensure at least some DOM text is present
-                text_len = self.cdp_js(
-                    ws, "document.body ? document.body.innerText.length : 0"
-                ) or 0
-                if text_len < 10:
-                    ws.close()
-                    raise CDPError(
-                        f"Selector {selector!r} not found and DOM text is "
-                        f"too short after {timeout}s for {url}"
-                    )
+            # 6. Optional selector wait (SPA), with DOM fallback on timeout
+            if selector:
+                found = self.wait_for_selector(ws, selector, timeout=remaining())
+                if not found:
+                    text_len = self.cdp_js(
+                        ws, "document.body ? document.body.innerText.length : 0"
+                    ) or 0
+                    if text_len < 10:
+                        raise CDPError(
+                            f"Selector {selector!r} not found and DOM text is "
+                            f"too short after {timeout}s for {url}"
+                        )
+        except Exception:
+            ws.close()
+            raise
 
         return ws
 
-    def _wait_load_event(self, ws: websocket.WebSocket, timeout: int = 15) -> bool:
+    def _wait_load_event(self, ws: websocket.WebSocket, timeout: float = 15) -> bool:
         """
-        Drain raw WebSocket messages waiting for Page.loadEventFired.
+        Wait for Page.loadEventFired, checking the buffered event queue first
+        (events pushed there by cdp_send) before draining raw ws messages.
 
-        Does NOT use cdp_send (which only returns matching IDs); the load
-        event has no ID and would otherwise be discarded.
+        This avoids the race where the load event arrives while cdp_send is
+        draining responses for Page.navigate and would otherwise swallow it.
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            ws.settimeout(min(deadline - time.time(), 5.0))
+        queue = self._get_event_queue(ws)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # 1. Drain any buffered events first
+            while queue:
+                msg = queue.popleft()
+                if msg.get("method") == "Page.loadEventFired":
+                    return True
+            # 2. Then read live messages
+            ws.settimeout(min(deadline - time.monotonic(), 5.0))
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
@@ -281,12 +318,19 @@ class ChromeReader:
                 continue
             if msg.get("method") == "Page.loadEventFired":
                 return True
+            # non-load events buffered for other waiters
+            if msg.get("method"):
+                queue.append(msg)
+        # Final drain of buffered events before giving up
+        while queue:
+            if queue.popleft().get("method") == "Page.loadEventFired":
+                return True
         return False
 
-    def _wait_ready_state(self, ws: websocket.WebSocket, timeout: int = 15) -> bool:
+    def _wait_ready_state(self, ws: websocket.WebSocket, timeout: float = 15) -> bool:
         """Poll document.readyState until interactive/complete."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             try:
                 state = self.cdp_js(
                     ws, "document.readyState"
@@ -299,7 +343,7 @@ class ChromeReader:
         return False
 
     def wait_for_selector(self, ws: websocket.WebSocket, selector: str,
-                          timeout: int = 15) -> bool:
+                          timeout: float = 15) -> bool:
         """
         Poll the DOM for a selector to appear. Returns True when found.
         Used for SPA sites (Gmail, Zalo, Facebook) where content renders
@@ -385,12 +429,13 @@ class ChromeReader:
 
         raise CDPError("Failed to take screenshot")
 
-    def read_gmail(self, search: str = "") -> Dict[str, Any]:
+    def read_gmail(self, search: str = "", wait: int = 15) -> Dict[str, Any]:
         """
         Read Gmail inbox.
 
         Args:
             search: Search query (optional, URL-encoded automatically)
+            wait: Max seconds for load + selector wait
 
         Returns:
             Dictionary with Gmail content
@@ -402,15 +447,15 @@ class ChromeReader:
             url = "https://mail.google.com/mail/u/0/#inbox"
 
         # Gmail is an SPA: wait for its main content selector, fall back to DOM.
-        return self.read(url, wait=15, selector='div[role="main"]')
+        return self.read(url, wait=wait, selector='div[role="main"]')
 
-    def read_zalo(self) -> Dict[str, Any]:
+    def read_zalo(self, wait: int = 15) -> Dict[str, Any]:
         """Read Zalo messages (SPA: wait for app mount)."""
-        return self.read("https://chat.zalo.me/", wait=15, selector="#app")
+        return self.read("https://chat.zalo.me/", wait=wait, selector="#app")
 
-    def read_facebook(self) -> Dict[str, Any]:
+    def read_facebook(self, wait: int = 15) -> Dict[str, Any]:
         """Read Facebook (SPA: wait for main content)."""
-        return self.read("https://www.facebook.com/", wait=15,
+        return self.read("https://www.facebook.com/", wait=wait,
                          selector='[role="main"]')
 
     def _get_tab_ws(self, tab_id: str) -> str:

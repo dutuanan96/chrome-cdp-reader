@@ -147,8 +147,9 @@ reader.screenshot("https://example.com", output="shot.jpg")  # real JPEG
   ```powershell
   netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 connectport=9222 connectaddress=::1
   ```
-- **No wildcard origin.** `--remote-allow-origins=*` is off unless you pass
-  `allow_all_origins=True` explicitly (e.g. for an extension).
+- **No wildcard origin.** `--remote-allow-origins=*` is never used. The CDP
+  client suppresses its `Origin` header (`suppress_origin=True`) so Chromium
+  147+ accepts the connection without an allowlist.
 - CDP can read/control any tab in the debug profile — only use it on a profile
   you control.
 

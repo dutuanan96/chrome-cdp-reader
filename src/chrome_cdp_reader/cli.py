@@ -54,11 +54,11 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
 
     try:
         if target.lower() == "gmail":
-            result = reader.read_gmail(search=search)
+            result = reader.read_gmail(search=search, wait=wait)
         elif target.lower() == "zalo":
-            result = reader.read_zalo()
+            result = reader.read_zalo(wait=wait)
         elif target.lower() == "facebook":
-            result = reader.read_facebook()
+            result = reader.read_facebook(wait=wait)
         else:
             result = reader.read(target, wait=wait)
 
