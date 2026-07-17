@@ -48,7 +48,7 @@ class TestCookieManager:
 
     def test_init_default(self):
         """Test CookieManager initialization with defaults."""
-        manager = CookieManager()
+        manager = CookieManager(win_user="TestUser")
         assert manager.debug_profile_name == "chrome-debug-profile"
 
     def test_init_custom(self):
@@ -63,12 +63,12 @@ class TestChromeLauncher:
 
     def test_init_default(self):
         """Test ChromeLauncher initialization with defaults."""
-        launcher = ChromeLauncher()
+        launcher = ChromeLauncher(win_user="TestUser")
         assert launcher.debug_port == 9222
 
     def test_init_custom(self):
         """Test ChromeLauncher initialization with custom values."""
-        launcher = ChromeLauncher(debug_port=9333)
+        launcher = ChromeLauncher(win_user="TestUser", debug_port=9333)
         assert launcher.debug_port == 9333
 
     def test_default_launch_args_no_origin_flag(self):
@@ -78,7 +78,7 @@ class TestChromeLauncher:
         flag. Chromium accepts the connection because the client suppresses
         the Origin header (non-browser CDP client).
         """
-        launcher = ChromeLauncher()
+        launcher = ChromeLauncher(win_user="TestUser")
         args = launcher._build_launch_args()
         assert not any(a.startswith("--remote-allow-origins") for a in args)
 
@@ -98,14 +98,16 @@ class TestCLI:
         from chrome_cdp_reader import __version__
         assert __version__ in result.output
 
-    def test_cli_status_no_keyerror(self):
+    def test_cli_status_no_keyerror(self, monkeypatch):
         """crc status must not raise KeyError (regression P0#2)."""
         from click.testing import CliRunner
         from chrome_cdp_reader.cli import cli
 
+        # CI runs on Ubuntu where detect_windows_user() would fail; pin it.
+        monkeypatch.setenv("WIN_USER", "TestUser")
         runner = CliRunner()
         # Without Chrome, status still prints profile info (no exception)
-        result = runner.invoke(cli, ['status'])
+        result = runner.invoke(cli, ['status'], env={"WIN_USER": "TestUser"})
         assert result.exit_code == 0, result.output
         assert "Debug Profile" in result.output
 
