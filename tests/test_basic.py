@@ -117,7 +117,7 @@ class TestCLI:
         reader = ChromeReader()
         captured = {}
 
-        def fake_read(url, wait=5):
+        def fake_read(url, wait=5, **kwargs):
             captured["url"] = url
             return {}
 
