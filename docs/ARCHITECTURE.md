@@ -15,28 +15,38 @@ The main class that handles:
 - Extracting page content
 - Taking screenshots
 
-### 2. CookieManager (cookie_manager.py)
+### 2. ChromeProfileManager — `cookie_manager.py`
 
-Handles cookie synchronization between:
-- Default Chrome profile (where you're logged in)
-- Debug profile (used by chrome-cdp-reader)
+> Note: historically named `CookieManager`. It no longer synchronizes cookies.
+> Chrome 136+ encrypts each profile with a separate key, so a copied cookie
+> database cannot be decrypted by the debug profile. The class now only
+> **creates and inspects the dedicated debug profile directory**; you log in
+> once and cookies persist inside that profile. It never reads your default
+> profile, passwords (Login Data) or any cookies.
 
-### 3. ChromeLauncher (chrome_launcher.py)
+### 2b. ChromeLauncher — `chrome_launcher.py` (process safety)
 
-Manages Chrome lifecycle:
-- Killing existing Chrome processes
-- Launching Chrome with debug mode
-- Verifying CDP connection
+Manages Chrome lifecycle with defense-in-depth:
+- `kill_chrome()` kills ONLY the Chrome instance that owns the debug port AND
+  debug profile. It verifies process name + command line (`--remote-debugging-port`
+  and `--user-data-dir=...chrome-debug-profile`) before killing — never
+  `taskkill /IM chrome.exe`. If another process holds the port, it FAILS FAST
+  (returns False) so a debug Chrome is not launched on top of it.
+- `launch()` polls until `/json/version` is reachable (verifies the real CDP
+  endpoint, not just the listening socket).
 
-### 4. CLI (cli.py)
+### 2c. Navigation correlation — `bridge.py`
 
-Command-line interface providing:
-- `crc read <target>` - Read content from a website
-- `crc screenshot <url>` - Take a screenshot
-- `crc status` - Check connection status
-- `crc setup` - One-time setup
-
-### 5. Readers (readers/)
+`ChromeReader._prepare_tab` drives a robust tab lifecycle:
+- Enables `Page.setLifecycleEventsEnabled`.
+- Drains stale events (e.g. from `about:blank`) before navigating.
+- Navigates exactly once, capturing `frameId` + `loaderId` from `Page.navigate`
+  and surfacing `errorText` / `isDownload` immediately.
+- Waits for completion via `Page.lifecycleEvent` correlated by `frameId` +
+  `loaderId`, or `Page.navigatedWithinDocument` for same-document navigation.
+  Falls back to `Page.loadEventFired` on older protocol.
+- `read_text(max_chars=...)` truncates `document.body.innerText` INSIDE the
+  browser before the JSON leaves via CDP.
 
 Site-specific readers for:
 - Gmail

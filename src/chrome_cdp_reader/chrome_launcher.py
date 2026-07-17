@@ -42,33 +42,147 @@ class ChromeLauncher:
         """Deprecated: use chrome_cdp_reader.utils.detect_windows_user instead."""
         return detect_windows_user()
 
+    def _find_debug_chrome_pid(self) -> Optional[int]:
+        """Return the PID of the Chrome instance that OWNS this launcher's debug
+        port AND debug profile (verified via Get-NetTCPConnection + Win32_Process
+        on Windows). Returns None if the port is free, occupied by a different
+        process, or by a Chrome instance with a different user-data-dir.
+        """
+        try:
+            ps = (
+                "$pids = (Get-NetTCPConnection -LocalPort {port} -State Listen "
+                "-ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; "
+                "$debugPid = $null; "
+                "foreach ($p in $pids) {{ "
+                "  $proc = Get-CimInstance Win32_Process -Filter \"ProcessId = $p\"; "
+                "  if ($proc -and $proc.Name -eq 'chrome.exe' -and "
+                "      $proc.CommandLine -match '--remote-debugging-port={port}' -and "
+                "      $proc.CommandLine -match '{profile}') {{ $debugPid = $p }} "
+                "}}; "
+                "if ($debugPid -ne $null) {{ $debugPid | ConvertTo-Json -Compress }} "
+                "else {{ 'null' }}"
+            ).format(port=self.debug_port, profile=self.debug_profile_name)
+            out = self._run_powershell(ps)
+            if not out or out.strip() == "null":
+                return None
+            return int(out.strip())
+        except Exception:
+            return None
+
+    def _find_intruder_on_port(self) -> Optional[dict]:
+        """Return info about a process occupying the debug port that is NOT this
+        launcher's debug Chrome (verified by Name + command line). None if the
+        only occupant is our own debug Chrome or the port is free.
+        """
+        try:
+            import json as _json
+            ps = (
+                "$pids = (Get-NetTCPConnection -LocalPort {port} -State Listen "
+                "-ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique; "
+                "$out = @(); "
+                "foreach ($p in $pids) {{ "
+                "  $proc = Get-CimInstance Win32_Process -Filter \"ProcessId = $p\"; "
+                "  if ($proc) {{ $out += [pscustomobject]@{{ PID = $p; Name = $proc.Name; "
+                "CommandLine = $proc.CommandLine }} }} "
+                "}}; "
+                "$out | ConvertTo-Json -Compress -Depth 3"
+            ).format(port=self.debug_port)
+            out = self._run_powershell(ps)
+            if not out:
+                return None
+            data = _json.loads(out)
+            items = data if isinstance(data, list) else [data]
+            for it in items:
+                cl = it.get("CommandLine") or ""
+                if not (it.get("Name") == "chrome.exe"
+                        and f"--remote-debugging-port={self.debug_port}" in cl
+                        and self.debug_profile_name in cl):
+                    return it
+            return None
+        except Exception:
+            return None
+
+    def _run_powershell(self, script: str, timeout: int = 25) -> str:
+        """Execute a PowerShell script via a temp .ps1 file (avoids f-string /
+        quote-escaping pitfalls). Returns stripped stdout.
+        """
+        import tempfile
+        import os
+        fd, path = tempfile.mkstemp(suffix=".ps1", prefix="crc_launch_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(script)
+            proc = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", path],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if proc.returncode != 0 and proc.stderr.strip():
+                raise RuntimeError(proc.stderr.strip())
+            return proc.stdout.strip()
+        finally:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+
     def kill_chrome(self, only_debug_profile: bool = True) -> bool:
         """
-        Kill Chrome processes.
+        Kill ONLY the Chrome instance that owns this launcher's debug port AND
+        debug profile. Verifies process Name + command line (port + profile)
+        before killing — never `taskkill /IM chrome.exe`.
 
-        By default (only_debug_profile=True) only the Chrome instance bound to
-        the debug port is killed, leaving other Chrome windows untouched.
-        Pass only_debug_profile=False to kill every chrome.exe (legacy).
+        If the port is occupied by a DIFFERENT process (e.g. Python/Node/Docker),
+        FAIL-FAST: refuse to kill it and return False so the caller does NOT
+        launch a debug Chrome on top of it.
 
         Returns:
-            True if the targeted process was killed (or was not running);
-            False if the kill command failed.
+            True if the debug Chrome was killed (or was not running).
+            False if an intruder occupies the port (fail-fast, no launch).
         """
         try:
             if only_debug_profile:
-                # Kill only the process listening on the debug port (netstat + taskkill by PID)
+                intruder = self._find_intruder_on_port()
+                if intruder and not (
+                    intruder.get("Name") == "chrome.exe"
+                    and self.debug_profile_name in (intruder.get("CommandLine") or "")
+                ):
+                    print(
+                        f"[FAIL-FAST] Port {self.debug_port} occupied by "
+                        f"{intruder.get('Name')} PID={intruder.get('PID')}"
+                    )
+                    print(f"  CommandLine: {intruder.get('CommandLine')}")
+                    print("  Refusing to kill / launch Chrome debug.")
+                    return False
+                pid = self._find_debug_chrome_pid()
+                if pid is None:
+                    return True  # nothing to kill
                 proc = subprocess.run(
-                    ["cmd.exe", "/c",
-                     f"for /f \"tokens=5\" %p in ('netstat -ano ^| findstr :{self.debug_port} ^| findstr LISTENING') do taskkill /F /PID %p"],
-                    capture_output=True, text=True, timeout=15
+                    ["taskkill.exe", "/F", "/PID", str(pid)],
+                    capture_output=True, text=True, timeout=15,
                 )
-                # returncode 0/1 both okay: 1 just means "nothing matched"
-                return proc.returncode in (0, 1)
+                if proc.returncode not in (0, 1):
+                    print(f"Warning: taskkill PID {pid} returned {proc.returncode}")
+                    return False
+                # poll until the port is actually free
+                import time as _time
+                deadline = _time.monotonic() + 15
+                while _time.monotonic() < deadline:
+                    if (self._find_intruder_on_port() is None
+                            and self._find_debug_chrome_pid() is None):
+                        return True
+                    _time.sleep(1.0)
+                print(f"Warning: port {self.debug_port} still occupied after kill")
+                return False
             else:
-                # Legacy: kill ALL Chrome (use with care)
+                # Legacy path kept for API compatibility but made SAFE:
+                # still verify it is the debug Chrome before killing.
+                pid = self._find_debug_chrome_pid()
+                if pid is None:
+                    return True
                 proc = subprocess.run(
-                    ["taskkill.exe", "/F", "/IM", "chrome.exe"],
-                    capture_output=True, text=True, timeout=10
+                    ["taskkill.exe", "/F", "/PID", str(pid)],
+                    capture_output=True, text=True, timeout=15,
                 )
                 return proc.returncode in (0, 1)
         except Exception as e:

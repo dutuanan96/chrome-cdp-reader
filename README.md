@@ -47,6 +47,9 @@ the debug profile cannot decrypt it. So instead we:
 | 🔧 **CLI interface** | `crc read gmail`, `crc read <url>`, `crc screenshot` |
 | 🐍 **Python library** | `from chrome_cdp_reader import ChromeReader` |
 | 🔒 **Safe by default** | No cookie copy, no password touch, localhost-only |
+| 🛡️ **Safe process kill** | `crc setup` kills ONLY the Chrome instance that owns the debug port + debug profile (verified by PID, process name and command line). Never `taskkill /IM chrome.exe`. If the port is held by another process it FAILS FAST instead of launching on top of it. |
+| 🧭 **Correlated navigation** | Waits for `Page.lifecycleEvent` correlated by `frameId` + `loaderId` (or `navigatedWithinDocument` for same-document nav). Surfaces `errorText` / `isDownload` immediately. |
+| ✂️ **Bounded reads** | `read_text(max_chars=...)` truncates `document.body.innerText` INSIDE the browser before the JSON leaves via CDP, reducing payload and memory. |
 
 ## 🚀 Quick Start
 
