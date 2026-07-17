@@ -52,7 +52,7 @@
 **Solution:** Chrome 147+ binds to IPv6 only. Use port forwarding:
 
 ```powershell
-netsh interface portproxy add v4tov6 listenport=9222 listenaddress=0.0.0.0 connectport=9222 connectaddress=::1
+netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 connectport=9222 connectaddress=::1
 ```
 
 ### 4. Cookies not working

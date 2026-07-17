@@ -88,10 +88,10 @@ User Command (CLI)
 │  │ Chrome (Debug Mode)                             │   │
 │  │                                                 │   │
 │  │   --remote-debugging-port=9222                  │   │
-│  │   --remote-allow-origins=*                      │   │
-│  │   --user-data-dir=C:\chrome-debug-profile       │   │
+│  │   (no --remote-allow-origins=* by default)      │   │
+│  │   --user-data-dir=C:\Users\<you>\chrome-debug-profile │   │
 │  │                                                 │   │
-│  │   Cookies: copied from default profile          │   │
+│  │   Dedicated profile: log in once, cookies persist│   │
 │  └─────────────────────────────────────────────────┘   │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
@@ -115,7 +115,7 @@ networkingMode=mirrored
 If mirrored networking is not available, use port forwarding:
 
 ```powershell
-netsh interface portproxy add v4tov6 listenport=9222 listenaddress=0.0.0.0 connectport=9222 connectaddress=::1
+netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 connectport=9222 connectaddress=::1
 ```
 
 ## Security Considerations

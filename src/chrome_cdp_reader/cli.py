@@ -4,12 +4,13 @@ CLI Interface for chrome-cdp-reader
 
 import click
 import sys
+import json
 
 try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("chrome-cdp-reader")
 except Exception:
-    __version__ = "1.1.0"
+    __version__ = "0.0.0"
 
 
 @click.group()
@@ -25,10 +26,12 @@ def cli():
 @click.argument("target")
 @click.option("--search", "-s", help="Search query (for Gmail)")
 @click.option("--wait", "-w", default=3, help="Seconds to wait for page load")
-def read(target: str, search: str, wait: int):
+@click.option("--max-chars", default=4000, help="Max characters of text to print")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON instead of formatted text")
+def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
     """
     Read content from a website.
-    
+
     TARGET can be:
     - A URL (e.g., https://example.com)
     - "gmail" - Read Gmail inbox
@@ -36,18 +39,18 @@ def read(target: str, search: str, wait: int):
     - "facebook" - Read Facebook
     """
     from chrome_cdp_reader.bridge import ChromeReader
-    
+
     reader = ChromeReader()
-    
+
     # Check connection
     if not reader.is_connected():
         click.echo("Error: Cannot connect to Chrome.", err=True)
         click.echo("Make sure Chrome is running with --remote-debugging-port=9222", err=True)
         click.echo("Run: crc setup", err=True)
         sys.exit(1)
-    
+
     click.echo(f"Reading {target}...")
-    
+
     try:
         if target.lower() == "gmail":
             result = reader.read_gmail(search=search)
@@ -55,19 +58,26 @@ def read(target: str, search: str, wait: int):
             result = reader.read_zalo()
         else:
             result = reader.read(target, wait=wait)
-        
+
+        if as_json:
+            click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
         # Display results
         click.echo(f"\nTitle: {result.get('title', 'N/A')}")
         click.echo(f"URL: {result.get('url', 'N/A')}")
         click.echo("\nContent:")
         click.echo("-" * 50)
-        click.echo(result.get('text', 'No content')[:2000])
-        
+        text = result.get('text', 'No content')
+        if len(text) > max_chars:
+            text = text[:max_chars] + f"\n... [truncated, {len(text)} chars total]"
+        click.echo(text)
+
         if result.get('links'):
             click.echo(f"\nLinks ({len(result['links'])}):")
             for link in result['links'][:10]:
                 click.echo(f"  - {link['text'][:50]}: {link['href']}")
-        
+
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -82,15 +92,15 @@ def screenshot(url: str, output: str, wait: int):
     Take a screenshot of a URL.
     """
     from chrome_cdp_reader.bridge import ChromeReader
-    
+
     reader = ChromeReader()
-    
+
     if not reader.is_connected():
         click.echo("Error: Cannot connect to Chrome.", err=True)
         sys.exit(1)
-    
+
     click.echo(f"Taking screenshot of {url}...")
-    
+
     try:
         result = reader.screenshot(url, output=output, wait=wait)
         click.echo(f"Screenshot saved to: {result}")
@@ -107,35 +117,35 @@ def status():
     from chrome_cdp_reader.bridge import ChromeReader
     from chrome_cdp_reader.cookie_manager import CookieManager
     from chrome_cdp_reader.chrome_launcher import ChromeLauncher
-    
+
     reader = ChromeReader()
     cookie_mgr = CookieManager()
     launcher = ChromeLauncher()
-    
+
     click.echo("Chrome CDP Reader Status")
     click.echo("=" * 50)
-    
+
     # Connection
     if reader.is_connected():
         version = reader.get_version()
         click.echo(f"✓ Connected to Chrome: {version.get('Browser', 'Unknown')}")
     else:
         click.echo("✗ Not connected to Chrome")
-    
+
     # Tabs
     try:
         tabs = reader.get_tabs()
         click.echo(f"✓ Open tabs: {len(tabs)}")
     except Exception:
         click.echo("✗ Cannot list tabs")
-    
+
     # Cookie status
     cookie_status = cookie_mgr.get_status()
     click.echo("\nCookie Manager:")
     click.echo(f"  Windows user: {cookie_status['win_user']}")
     click.echo(f"  Default profile exists: {cookie_status['default_exists']}")
     click.echo(f"  Debug profile exists: {cookie_status['debug_exists']}")
-    
+
     # Chrome status
     chrome_status = launcher.get_status()
     click.echo("\nChrome Launcher:")
@@ -149,71 +159,45 @@ def setup():
     """
     from chrome_cdp_reader.cookie_manager import CookieManager
     from chrome_cdp_reader.chrome_launcher import ChromeLauncher
-    
+
     click.echo("Setting up Chrome debug mode...")
     click.echo("=" * 50)
-    
-    # Step 1: Kill Chrome
-    click.echo("\n1. Killing existing Chrome processes...")
+
+    # Step 1: Kill Chrome bound to the debug port
+    click.echo("\n1. Killing existing Chrome debug processes...")
     launcher = ChromeLauncher()
-    launcher.kill_chrome()
-    
-    # Step 2: Create debug profile
+    if not launcher.kill_chrome():
+        click.echo("✗ Failed to kill Chrome debug process", err=True)
+        sys.exit(1)
+
+    # Step 2: Create debug profile (empty; you log in ONCE, cookies persist)
     click.echo("\n2. Creating debug profile...")
     cookie_mgr = CookieManager()
-    cookie_mgr.create_debug_profile()
-    
-    # Step 3: Copy cookies
-    click.echo("\n3. Copying cookies...")
-    cookie_mgr.copy_cookies()
-    
-    # Step 4: Launch Chrome
-    click.echo("\n4. Launching Chrome with debug mode...")
-    launcher.launch()
-    
-    # Step 5: Verify
-    click.echo("\n5. Verifying connection...")
+    if not cookie_mgr.create_debug_profile():
+        click.echo("✗ Failed to create debug profile", err=True)
+        sys.exit(1)
+    click.echo(f"  Debug profile: {cookie_mgr.debug_profile}")
+    click.echo("  (Log in ONCE in the opened Chrome; cookies persist there.)")
+
+    # Step 3: Launch Chrome
+    click.echo("\n3. Launching Chrome with debug mode...")
+    if not launcher.launch():
+        click.echo("✗ Failed to launch Chrome", err=True)
+        sys.exit(1)
+
+    # Step 4: Verify
+    click.echo("\n4. Verifying connection...")
     status = launcher.verify_connection()
-    
+
     if status["connected"]:
         click.echo(f"✓ Chrome is running: {status['browser']}")
-        click.echo("\nSetup complete! You can now use:")
+        click.echo("\nSetup complete! Log in once, then use:")
         click.echo("  crc read gmail")
         click.echo("  crc read https://example.com")
     else:
-        click.echo("✗ Failed to connect to Chrome")
-        click.echo("Please check Chrome is installed and try again")
-
-
-@cli.command()
-def cookies():
-    """
-    Manage cookies (copy from default to debug profile).
-    """
-    from chrome_cdp_reader.cookie_manager import CookieManager
-    
-    manager = CookieManager()
-    
-    click.echo("Cookie Manager")
-    click.echo("=" * 50)
-    
-    status = manager.get_status()
-    click.echo(f"Windows user: {status['win_user']}")
-    click.echo(f"Default profile: {status['default_profile']}")
-    click.echo(f"Debug profile: {status['debug_profile']}")
-    
-    click.echo("\nCopying cookies...")
-    if manager.copy_cookies():
-        click.echo("\n✓ Cookies copied successfully!")
-    else:
-        click.echo("\n✗ Some cookies failed to copy")
-    
-    # Verify
-    click.echo("\nVerification:")
-    cookies = manager.verify_cookies()
-    for name, info in cookies.items():
-        status = "✓" if info["exists"] else "✗"
-        click.echo(f"  {status} {name}: {info['size']} bytes")
+        click.echo("✗ Failed to connect to Chrome", err=True)
+        click.echo("Please check Chrome is installed and try again", err=True)
+        sys.exit(1)
 
 
 def main():

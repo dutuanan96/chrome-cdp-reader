@@ -1,9 +1,16 @@
 """
 chrome-cdp-reader: Read your logged-in websites from WSL via Chrome DevTools Protocol
-v1.1.0 — Fixed: auto-increment ID, drain loop, JPEG screenshots, error handling
+
+Alpha CDP reader for a dedicated Chrome debug profile (you log in once).
+No cookie/password copying. No wildcard origin. Localhost only.
 """
 
-__version__ = "1.1.0"
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("chrome-cdp-reader")
+except Exception:
+    __version__ = "0.0.0"  # package not installed; single source of truth is pyproject.toml
+
 __author__ = "dutuanan96"
 
 from chrome_cdp_reader.bridge import ChromeReader, CDPError, TabNotFoundError

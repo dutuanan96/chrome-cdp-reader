@@ -3,7 +3,6 @@ Chrome Launcher - Launch Chrome with debug mode enabled
 """
 
 import subprocess
-import time
 from typing import Optional
 
 from chrome_cdp_reader.utils import detect_windows_user
@@ -12,12 +11,12 @@ from chrome_cdp_reader.utils import detect_windows_user
 class ChromeLauncher:
     """
     Launch Chrome with remote debugging enabled.
-    
+
     Usage:
         launcher = ChromeLauncher()
         launcher.launch()
     """
-    
+
     def __init__(
         self,
         win_user: Optional[str] = None,
@@ -28,7 +27,7 @@ class ChromeLauncher:
     ):
         """
         Initialize ChromeLauncher.
-        
+
         Args:
             win_user: Windows username (auto-detected if None)
             debug_port: Chrome debugging port
@@ -40,7 +39,7 @@ class ChromeLauncher:
         self.debug_profile_name = debug_profile_name
         self.chrome_path = chrome_path
         self.allow_all_origins = allow_all_origins
-        
+
     def _detect_windows_user(self) -> str:
         """Deprecated: use chrome_cdp_reader.utils.detect_windows_user instead."""
         return detect_windows_user()
@@ -54,82 +53,90 @@ class ChromeLauncher:
         Pass only_debug_profile=False to kill every chrome.exe (legacy).
 
         Returns:
-            True if successful
+            True if the targeted process was killed (or was not running);
+            False if the kill command failed.
         """
         try:
             if only_debug_profile:
                 # Kill only the process listening on the debug port (netstat + taskkill by PID)
-                subprocess.run(
+                proc = subprocess.run(
                     ["cmd.exe", "/c",
                      f"for /f \"tokens=5\" %p in ('netstat -ano ^| findstr :{self.debug_port} ^| findstr LISTENING') do taskkill /F /PID %p"],
-                    capture_output=True, timeout=15
+                    capture_output=True, text=True, timeout=15
                 )
+                # returncode 0/1 both okay: 1 just means "nothing matched"
+                return proc.returncode in (0, 1)
             else:
                 # Legacy: kill ALL Chrome (use with care)
-                subprocess.run(
+                proc = subprocess.run(
                     ["taskkill.exe", "/F", "/IM", "chrome.exe"],
-                    capture_output=True, timeout=10
+                    capture_output=True, text=True, timeout=10
                 )
-            time.sleep(2)
-            return True
+                return proc.returncode in (0, 1)
         except Exception as e:
             print(f"Warning: Could not kill Chrome: {e}")
             return False
-    
-    def launch(self, headless: bool = False) -> bool:
+
+    def launch(self, headless: bool = False, timeout: int = 15) -> bool:
         """
         Launch Chrome with remote debugging.
-        
+
         Args:
             headless: Run Chrome in headless mode
-            
+            timeout: Seconds to wait for CDP to become reachable
+
         Returns:
-            True if successful
+            True only if Chrome started AND CDP is reachable on the debug port.
         """
         debug_profile_path = f"C:\\Users\\{self.win_user}\\{self.debug_profile_name}"
-        
+
         args = [
             self.chrome_path,
             f"--remote-debugging-port={self.debug_port}",
             f"--user-data-dir={debug_profile_path}"
         ]
-        
+
         # SECURITY: only enable --remote-allow-origins=* when explicitly requested
         # (e.g. cross-origin extension use). Default keeps Chrome's Origin-check
         # active to prevent arbitrary web pages from hijacking the CDP port.
         if self.allow_all_origins:
             args.append("--remote-allow-origins=*")
-        
+
         if headless:
             args.append("--headless=new")
-        
+
         try:
             # Launch Chrome via Windows
             subprocess.Popen(
                 ["cmd.exe", "/c", "start", ""] + args,
                 shell=False
             )
-            
-            # Wait for Chrome to start
-            time.sleep(5)
-            
-            return True
-            
         except Exception as e:
             print(f"Error launching Chrome: {e}")
             return False
-    
+
+        # Wait until CDP is actually reachable (no blind sleep)
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            status = self.verify_connection()
+            if status.get("connected"):
+                return True
+            _time.sleep(0.5)
+        print(f"Warning: Chrome launched but CDP not reachable on port {self.debug_port} after {timeout}s")
+        return False
+
     def verify_connection(self) -> dict:
         """
         Verify Chrome is running and CDP is accessible.
-        
+
         Returns:
             Dictionary with connection status
         """
         import json
         from urllib.request import urlopen
         from urllib.error import URLError
-        
+
         try:
             url = f"http://127.0.0.1:{self.debug_port}/json/version"
             with urlopen(url, timeout=5) as response:
@@ -149,11 +156,11 @@ class ChromeLauncher:
                 "connected": False,
                 "error": str(e)
             }
-    
+
     def get_status(self) -> dict:
         """
         Get Chrome launcher status.
-        
+
         Returns:
             Dictionary with status info
         """
