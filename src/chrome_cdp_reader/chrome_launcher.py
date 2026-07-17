@@ -121,8 +121,8 @@ class ChromeLauncher:
 
         # Wait until CDP is actually reachable (no blind sleep)
         import time as _time
-        deadline = _time.time() + timeout
-        while _time.time() < deadline:
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
             status = self.verify_connection()
             if status.get("connected"):
                 return True

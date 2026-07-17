@@ -108,8 +108,8 @@ class ChromeReader:
 
         cdp_send() only returns responses whose id matches; events such as
         Page.loadEventFired would otherwise be discarded. We buffer them here
-        so waiters like _wait_load_event can drain them without racing the
-        response-matching loop.
+        so the load-wait loop can drain them without racing the
+        response-matching loop of an in-flight cdp_send().
         """
         if not hasattr(ws, "_cdp_event_queue"):
             ws._cdp_event_queue = deque()
@@ -137,9 +137,9 @@ class ChromeReader:
         }))
         logger.debug("CDP send id=%s method=%s", msg_id, method)
 
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            ws.settimeout(min(deadline - time.time(), 5.0))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ws.settimeout(min(deadline - time.monotonic(), 5.0))
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
@@ -155,13 +155,19 @@ class ChromeReader:
 
         raise CDPError(f"CDP method {method} timed out after {timeout}s")
 
-    def cdp_js(self, ws: websocket.WebSocket, expression: str) -> Any:
+    def cdp_js(self, ws: websocket.WebSocket, expression: str,
+               timeout: float = 10) -> Any:
         """Evaluate JS and return primitive value."""
-        result = self.cdp_send(ws, "Runtime.evaluate", {
-            "expression": expression,
-            "awaitPromise": True,
-            "returnByValue": True,
-        })
+        result = self.cdp_send(
+            ws,
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+            timeout=timeout,
+        )
         if result.get("exceptionDetails"):
             raise CDPError(f"JS exception: {result['exceptionDetails']}")
         return result.get("result", {}).get("value")
@@ -241,6 +247,7 @@ class ChromeReader:
             navigate = True
 
         ws = self._connect(ws_url)
+        ws._target_id = tab_id  # remember for cleanup (close tab after read)
         deadline = time.monotonic() + timeout
 
         def remaining():
@@ -254,7 +261,7 @@ class ChromeReader:
             # 3. Navigate exactly once (no reload)
             if navigate:
                 self.cdp_send(ws, "Page.navigate", {"url": url},
-                              timeout=min(15, remaining()))
+                              timeout=min(20, remaining()))
 
             # 4. Wait for load event (only when we actually navigated).
             if navigate:
@@ -328,12 +335,20 @@ class ChromeReader:
         return False
 
     def _wait_ready_state(self, ws: websocket.WebSocket, timeout: float = 15) -> bool:
-        """Poll document.readyState until interactive/complete."""
+        """Poll document.readyState until interactive/complete.
+
+        Uses the supplied `timeout` as an overall budget; each Runtime.evaluate
+        gets at most min(2.0, remaining) so a hung evaluate cannot blow the
+        overall deadline.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            left = max(0.0, deadline - time.monotonic())
+            if left <= 0:
+                return False
             try:
                 state = self.cdp_js(
-                    ws, "document.readyState"
+                    ws, "document.readyState", timeout=min(2.0, left)
                 )
             except Exception:
                 state = None
@@ -347,15 +362,38 @@ class ChromeReader:
         """
         Poll the DOM for a selector to appear. Returns True when found.
         Used for SPA sites (Gmail, Zalo, Facebook) where content renders
-        after the load event.
+        after the load event. Each evaluate is bounded by min(2.0, remaining).
         """
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            found = self.cdp_js(ws, f"!!document.querySelector({json.dumps(selector)})")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            left = max(0.0, deadline - time.monotonic())
+            if left <= 0:
+                return False
+            found = self.cdp_js(
+                ws, f"!!document.querySelector({json.dumps(selector)})",
+                timeout=min(2.0, left),
+            )
             if found:
                 return True
             time.sleep(0.5)
         return False
+
+    def _close_tab(self, ws: websocket.WebSocket) -> None:
+        """Close the tab we opened (best-effort) to avoid target buildup."""
+        target_id = getattr(ws, "_target_id", None)
+        if target_id:
+            try:
+                browser_ws = self._get_json("/json/version").get(
+                    "webSocketDebuggerUrl", "")
+                if browser_ws:
+                    bw = self._connect(browser_ws, timeout=5)
+                    try:
+                        self.cdp_send(bw, "Target.closeTarget",
+                                      {"targetId": target_id}, timeout=5)
+                    finally:
+                        bw.close()
+            except Exception:
+                pass
 
     def read(self, url: str, wait: int = 15,
              selector: Optional[str] = None) -> Dict[str, Any]:
@@ -390,6 +428,7 @@ class ChromeReader:
             """)
             return json.loads(content) if content else {}
         finally:
+            self._close_tab(ws)
             ws.close()
 
     def screenshot(self, url: str, output: str = "screenshot.jpg",
@@ -425,6 +464,7 @@ class ChromeReader:
                     f.write(img_data)
                 return output
         finally:
+            self._close_tab(ws)
             ws.close()
 
         raise CDPError("Failed to take screenshot")

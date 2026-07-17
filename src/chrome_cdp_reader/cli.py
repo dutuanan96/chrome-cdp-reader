@@ -25,7 +25,10 @@ def cli():
 @cli.command()
 @click.argument("target")
 @click.option("--search", "-s", help="Search query (for Gmail)")
-@click.option("--wait", "-w", default=3, help="Seconds to wait for page load")
+@click.option(
+    "--wait", "-w", type=click.IntRange(min=1), default=15, show_default=True,
+    help="Maximum seconds to wait for page readiness",
+)
 @click.option("--max-chars", default=4000, help="Max characters of text to print")
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON instead of formatted text")
 def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
@@ -89,7 +92,10 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
 @cli.command()
 @click.argument("url")
 @click.option("--output", "-o", default="screenshot.png", help="Output file path")
-@click.option("--wait", "-w", default=3, help="Seconds to wait for page load")
+@click.option(
+    "--wait", "-w", type=click.IntRange(min=1), default=15, show_default=True,
+    help="Maximum seconds to wait for page readiness",
+)
 def screenshot(url: str, output: str, wait: int):
     """
     Take a screenshot of a URL.

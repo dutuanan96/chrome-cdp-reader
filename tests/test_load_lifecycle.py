@@ -139,7 +139,9 @@ def test_late_selector_waited():
     # selector returns False on first poll, True after
     calls = {"n": 0}
 
-    def fake_js(ws2, expr):
+    def fake_js(ws2, expr, timeout=None):
+        if "readyState" in expr:
+            return "complete"
         if "querySelector" in expr:
             calls["n"] += 1
             return calls["n"] >= 2
@@ -157,7 +159,9 @@ def test_selector_timeout_fallback_ok():
     ws = _FakeWS()
     reader = _make_reader(ws)
 
-    def fake_js(ws2, expr):
+    def fake_js(ws2, expr, timeout=None):
+        if "readyState" in expr:
+            return "complete"
         if "querySelector" in expr:
             return False  # never appears
         if "innerText.length" in expr:
