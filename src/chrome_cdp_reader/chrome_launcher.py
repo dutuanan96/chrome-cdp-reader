@@ -81,16 +81,19 @@ class ChromeLauncher:
         """
         Build the Chrome command-line arguments for debug mode.
 
-        SECURITY: --remote-allow-origins=* is OFF by default. It is only added
+        SECURITY: Chrome 147+ enforces an Origin-check on the CDP WebSocket.
+        Without an allowlist, even the local client (origin
+        http://127.0.0.1:9222) is rejected with 403. We allow THAT specific
+        origin by default. The wildcard --remote-allow-origins=* is only added
         when allow_all_origins=True (explicit opt-in, e.g. for a trusted
-        extension). The flag disables Chrome's Origin-check on the CDP
-        WebSocket, letting any page in the debug profile drive CDP.
+        extension) — it would let any page in the debug profile drive CDP.
         """
         debug_profile_path = f"C:\\Users\\{self.win_user}\\{self.debug_profile_name}"
         args = [
             self.chrome_path,
             f"--remote-debugging-port={self.debug_port}",
-            f"--user-data-dir={debug_profile_path}"
+            f"--user-data-dir={debug_profile_path}",
+            f"--remote-allow-origins=http://127.0.0.1:{self.debug_port}",
         ]
         if self.allow_all_origins:
             args.append("--remote-allow-origins=*")

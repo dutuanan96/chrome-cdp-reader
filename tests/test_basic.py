@@ -71,18 +71,20 @@ class TestChromeLauncher:
         launcher = ChromeLauncher(debug_port=9333)
         assert launcher.debug_port == 9333
 
-    def test_default_launch_args_no_wildcard_origin(self):
+    def test_default_launch_args_allow_local_origin_only(self):
         """
-        Regression test (Claude review): `crc setup` must NOT pass
-        --remote-allow-origins=* by default. Any page open in the debug
-        profile could otherwise drive CDP.
+        Regression test (Claude review + live 403): `crc setup` must allow the
+        local CDP client origin (http://127.0.0.1:9222) so Chrome 147+ does not
+        reject the WebSocket with 403. It must NOT use the wildcard * (which
+        would let any page in the debug profile drive CDP).
         """
         launcher = ChromeLauncher()
         args = launcher._build_launch_args()
+        assert "--remote-allow-origins=http://127.0.0.1:9222" in args
         assert "--remote-allow-origins=*" not in args
 
     def test_opt_in_wildcard_origin(self):
-        """allow_all_origins=True must add the flag explicitly."""
+        """allow_all_origins=True must add the wildcard flag explicitly."""
         launcher = ChromeLauncher(allow_all_origins=True)
         args = launcher._build_launch_args()
         assert "--remote-allow-origins=*" in args

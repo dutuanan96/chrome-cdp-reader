@@ -40,7 +40,7 @@ def test_read_static_page():
 def test_screenshot_png_is_real_png(tmp_path):
     reader = ChromeReader()
     out = str(tmp_path / "shot.png")
-    saved = reader.screenshot("https://example.com", output=out, wait=5)
+    saved = reader.screenshot("https://example.com", output=out, wait=6)
     assert os.path.exists(saved)
     with open(saved, "rb") as f:
         header = f.read(8)
@@ -50,7 +50,7 @@ def test_screenshot_png_is_real_png(tmp_path):
 def test_screenshot_jpg_is_real_jpeg(tmp_path):
     reader = ChromeReader()
     out = str(tmp_path / "shot.jpg")
-    saved = reader.screenshot("https://example.com", output=out, wait=5)
+    saved = reader.screenshot("https://httpbin.org/", output=out, wait=6)
     assert os.path.exists(saved)
     with open(saved, "rb") as f:
         header = f.read(3)
