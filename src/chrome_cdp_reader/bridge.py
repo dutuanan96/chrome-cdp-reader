@@ -1,7 +1,8 @@
 """
 Chrome CDP Bridge - Connect to Windows Chrome from WSL
-v1.2.0 — Security hardening: dedicated debug profile, no cookie copy,
-load-event waits, JPEG/PNG by extension, structured logging (CRC_DEBUG).
+v1.3.0-alpha — Reliable tab lifecycle: about:blank -> enable -> navigate once
+-> Page.loadEventFired (drained, not swallowed) -> readyState -> selector wait
+(SPA) with DOM fallback. No Page.reload, no blind sleep. suppress_origin=True.
 """
 
 import json
@@ -149,10 +150,10 @@ class ChromeReader:
 
     def create_tab(self, url: str = "about:blank") -> str:
         """
-        Create a new tab.
+        Create a new tab (without navigating to a real URL yet).
 
         Args:
-            url: Initial URL for the tab
+            url: Initial URL (default about:blank)
 
         Returns:
             Target ID of the new tab
@@ -175,21 +176,98 @@ class ChromeReader:
 
         return target_id
 
-    def wait_for_load(self, ws: websocket.WebSocket, timeout: int = 20) -> bool:
+    def _prepare_tab(self, url: str, timeout: int = 15,
+                     selector: Optional[str] = None,
+                     reuse_existing: bool = False) -> websocket.WebSocket:
         """
-        Wait for a tab to finish loading via the CDP Page.loadEventFired event
-        (instead of a blind time.sleep). Returns True when the load event fires.
+        Robust tab lifecycle (core reliability primitive).
 
-        Must be called on a freshly-navigated tab.
+        Flow:
+          1. Reuse an existing matching tab OR create a new one on about:blank.
+          2. Connect the tab WebSocket, enable Page + Runtime events.
+          3. If a new tab, navigate exactly ONCE via Page.navigate (no reload).
+          4. Wait for Page.loadEventFired by draining raw ws messages (the
+             load event is NOT swallowed by cdp_send's ID-matching loop).
+          5. Poll document.readyState until interactive/complete.
+          6. If `selector` given, wait for it (SPA render); on timeout fall
+             back to DOM text instead of hanging.
+          7. On overall timeout, raise CDPError — never silently read a
+             half-loaded page.
+
+        Args:
+            url: URL to prepare
+            timeout: Max seconds for load + selector wait
+            selector: Optional CSS selector to wait for (SPA content)
+            reuse_existing: If True, navigate the existing matching tab in
+                place instead of opening a new one (and skip re-navigation
+                if the tab already shows the URL).
+
+        Returns:
+            An open WebSocket connected to the prepared tab. Caller must
+            close it (use a try/finally).
         """
+        # 1. Tab selection
+        if reuse_existing:
+            tab = self.find_tab(url)
+            if tab:
+                ws_url = tab.get("webSocketDebuggerUrl", "")
+                tab_id = tab.get("id", "")
+                navigate = tab.get("url", "") != url
+            else:
+                tab_id = self.create_tab("about:blank")
+                ws_url = self._get_tab_ws(tab_id)
+                navigate = True
+        else:
+            tab_id = self.create_tab("about:blank")
+            ws_url = self._get_tab_ws(tab_id)
+            navigate = True
+
+        ws = self._connect(ws_url)
+        # 2. Enable events BEFORE navigating
         self.cdp_send(ws, "Page.enable", timeout=5)
         self.cdp_send(ws, "Runtime.enable", timeout=5)
-        # Trigger navigation if a pending URL exists
-        try:
-            self.cdp_send(ws, "Page.reload", {"ignoreCache": False}, timeout=5)
-        except Exception:
-            pass
 
+        # 3. Navigate exactly once (no reload)
+        if navigate:
+            self.cdp_send(ws, "Page.navigate", {"url": url}, timeout=10)
+
+        # 4. Wait for load event by draining raw messages (only when we
+        #    actually navigated; a reused tab already at the URL is loaded).
+        if navigate:
+            load_ok = self._wait_load_event(ws, timeout=timeout)
+            if not load_ok:
+                ws.close()
+                raise CDPError(
+                    f"Page did not fire loadEventFired for {url} within {timeout}s"
+                )
+
+        # 5. Poll readyState
+        self._wait_ready_state(ws, timeout=timeout)
+
+        # 6. Optional selector wait (SPA), with DOM fallback on timeout
+        if selector:
+            found = self.wait_for_selector(ws, selector, timeout=timeout)
+            if not found:
+                # Fallback: ensure at least some DOM text is present
+                text_len = self.cdp_js(
+                    ws, "document.body ? document.body.innerText.length : 0"
+                ) or 0
+                if text_len < 10:
+                    ws.close()
+                    raise CDPError(
+                        f"Selector {selector!r} not found and DOM text is "
+                        f"too short after {timeout}s for {url}"
+                    )
+
+        return ws
+
+    def _wait_load_event(self, ws: websocket.WebSocket, timeout: int = 15) -> bool:
+        """
+        Drain raw WebSocket messages waiting for Page.loadEventFired.
+
+        Does NOT use cdp_send (which only returns matching IDs); the load
+        event has no ID and would otherwise be discarded.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             ws.settimeout(min(deadline - time.time(), 5.0))
@@ -197,10 +275,27 @@ class ChromeReader:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
                 continue
-            msg = json.loads(raw)
-            method = msg.get("method", "")
-            if method == "Page.loadEventFired":
+            try:
+                msg = json.loads(raw)
+            except (ValueError, json.JSONDecodeError):
+                continue
+            if msg.get("method") == "Page.loadEventFired":
                 return True
+        return False
+
+    def _wait_ready_state(self, ws: websocket.WebSocket, timeout: int = 15) -> bool:
+        """Poll document.readyState until interactive/complete."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                state = self.cdp_js(
+                    ws, "document.readyState"
+                )
+            except Exception:
+                state = None
+            if state in ("interactive", "complete"):
+                return True
+            time.sleep(0.3)
         return False
 
     def wait_for_selector(self, ws: websocket.WebSocket, selector: str,
@@ -218,36 +313,22 @@ class ChromeReader:
             time.sleep(0.5)
         return False
 
-    def read(self, url: str, wait: int = 3) -> Dict[str, Any]:
+    def read(self, url: str, wait: int = 15,
+             selector: Optional[str] = None) -> Dict[str, Any]:
         """
-        Read content from a URL.
+        Read content from a URL using the reliable tab lifecycle.
 
         Args:
             url: URL to read
-            wait: Max seconds to wait for load event + selector
+            wait: Max seconds for load event + selector wait
+            selector: Optional CSS selector to wait for (SPA content)
 
         Returns:
             Dictionary with page content
         """
-        # Find existing tab or create new one
-        tab = self.find_tab(url)
-        created = False
-        if not tab:
-            tab_id = self.create_tab(url)
-            ws_url = self._get_tab_ws(tab_id)
-            created = True
-        else:
-            ws_url = tab.get("webSocketDebuggerUrl", "")
-            tab_id = tab.get("id", "")
-
-        ws = self._connect(ws_url)
+        ws = self._prepare_tab(url, timeout=wait, selector=selector,
+                               reuse_existing=False)
         try:
-            if created:
-                # Wait for real load instead of a fixed sleep
-                self.wait_for_load(ws, timeout=wait + 10)
-                # Give SPA a moment to render after load event
-                time.sleep(1)
-            # Batch read title + text + links in one JS call (faster)
             content = self.cdp_js(ws, """
                 JSON.stringify({
                     title: document.title,
@@ -268,15 +349,15 @@ class ChromeReader:
             ws.close()
 
     def screenshot(self, url: str, output: str = "screenshot.jpg",
-                   wait: int = 3, quality: int = 80) -> str:
+                   wait: int = 15, quality: int = 80) -> str:
         """
-        Take a screenshot of a URL.
+        Take a screenshot of a URL using the same lifecycle as read().
 
         Args:
             url: URL to screenshot
             output: Output file path. Format is chosen from the extension:
                     .jpg/.jpeg -> JPEG (uses `quality`), .png -> PNG.
-            wait: Seconds to wait for page load
+            wait: Max seconds for page load
             quality: JPEG quality (1-100), ignored for PNG
 
         Returns:
@@ -287,15 +368,7 @@ class ChromeReader:
         is_png = ext in (".png",)
         capture_format = "png" if is_png else "jpeg"
 
-        tab = self.find_tab(url)
-        if not tab:
-            tab_id = self.create_tab(url)
-            ws_url = self._get_tab_ws(tab_id)
-            time.sleep(wait)
-        else:
-            ws_url = tab.get("webSocketDebuggerUrl", "")
-
-        ws = self._connect(ws_url)
+        ws = self._prepare_tab(url, timeout=wait, reuse_existing=False)
         try:
             params = {"format": capture_format}
             if not is_png:
@@ -307,7 +380,6 @@ class ChromeReader:
                 with open(output, "wb") as f:
                     f.write(img_data)
                 return output
-
         finally:
             ws.close()
 
@@ -329,11 +401,17 @@ class ChromeReader:
         else:
             url = "https://mail.google.com/mail/u/0/#inbox"
 
-        return self.read(url, wait=5)
+        # Gmail is an SPA: wait for its main content selector, fall back to DOM.
+        return self.read(url, wait=15, selector='div[role="main"]')
 
     def read_zalo(self) -> Dict[str, Any]:
-        """Read Zalo messages."""
-        return self.read("https://chat.zalo.me/", wait=5)
+        """Read Zalo messages (SPA: wait for app mount)."""
+        return self.read("https://chat.zalo.me/", wait=15, selector="#app")
+
+    def read_facebook(self) -> Dict[str, Any]:
+        """Read Facebook (SPA: wait for main content)."""
+        return self.read("https://www.facebook.com/", wait=15,
+                         selector='[role="main"]')
 
     def _get_tab_ws(self, tab_id: str) -> str:
         """Get WebSocket URL for a specific tab."""

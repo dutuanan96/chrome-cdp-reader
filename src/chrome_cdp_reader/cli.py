@@ -58,7 +58,7 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
         elif target.lower() == "zalo":
             result = reader.read_zalo()
         elif target.lower() == "facebook":
-            result = reader.read("https://www.facebook.com/", wait=max(wait, 5))
+            result = reader.read_facebook()
         else:
             result = reader.read(target, wait=wait)
 
