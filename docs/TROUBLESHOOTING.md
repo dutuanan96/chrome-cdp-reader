@@ -8,10 +8,22 @@
 
 **Solutions:**
 
-1. Kill all Chrome processes first:
-   ```bash
-   taskkill.exe /F /IM chrome.exe
+1. Kill the debug Chrome (only the instance that owns the debug port + profile).
+   Prefer `crc setup`, which verifies the process by PID, name and command line
+   before killing — it never uses `taskkill /IM chrome.exe`. If another process
+   holds port 9222, `crc setup` fails fast instead of killing it.
+   To kill manually and safely on Windows (verify first):
+   ```powershell
+   # find the debug-chrome PID listening on 9222 with the right profile
+   $p = (Get-NetTCPConnection -LocalPort 9222 -State Listen).OwningProcess | Select-Object -Unique
+   foreach ($pid in $p) {
+     $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $pid"
+     if ($proc.Name -eq 'chrome.exe' -and $proc.CommandLine -match '--remote-debugging-port=9222' -and $proc.CommandLine -match 'chrome-debug-profile') {
+       taskkill /F /PID $pid
+     }
+   }
    ```
+   Do NOT run `taskkill.exe /F /IM chrome.exe` — it kills every Chrome window.
 
 2. Check if port 9222 is already in use:
    ```bash
@@ -66,7 +78,7 @@ netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 con
 2. Make sure Chrome debug is running (`crc status` shows "Connected").
 3. Check if the site session is still valid (re-log-in if expired):
    ```bash
-   ls /mnt/c/Users/HP/chrome-debug-profile/Default/Cookies
+   ls /mnt/c/Users/<YOUR_WINDOWS_USERNAME>/chrome-debug-profile/Default/Cookies
    ```
 
 ### 5. Permission Denied
@@ -92,7 +104,7 @@ netsh interface portproxy add v4tov6 listenport=9222 listenaddress=127.0.0.1 con
 
 1. Delete corrupted profile:
    ```bash
-   rm -rf /mnt/c/Users/HP/chrome-debug-profile
+   rm -rf /mnt/c/Users/<YOUR_WINDOWS_USERNAME>/chrome-debug-profile
    ```
 
 2. Check Chrome version:

@@ -282,12 +282,16 @@ def test_race_load_event_before_navigate_response():
     Uses the PRODUCTION cdp_send (no mock override of the receive loop).
     """
     load_event = json.dumps({"method": "Page.loadEventFired", "params": {}})
-    # Real send order: createTarget(id=1), Page.enable(id=2), Page.navigate(id=3)
+    # Real send order: createTarget(id=1), Page.enable(id=2), Runtime.enable(id=3),
+    # setLifecycleEventsEnabled(id=4), Page.navigate(id=5)
     create_resp = json.dumps({"id": 1, "result": {"targetId": "T1"}})
     enable_resp = json.dumps({"id": 2, "result": {}})
-    navigate_resp = json.dumps({"id": 3, "result": {}})
+    runtime_resp = json.dumps({"id": 3, "result": {}})
+    lifecycle_resp = json.dumps({"id": 4, "result": {}})
+    navigate_resp = json.dumps({"id": 5, "result": {}})
     # Wire order forces the race: enable resp, THEN load event, THEN navigate resp
-    ws = _ScriptedWS([create_resp, enable_resp, load_event, navigate_resp])
+    ws = _ScriptedWS([create_resp, enable_resp, runtime_resp, lifecycle_resp,
+                      load_event, navigate_resp])
 
     reader = ChromeReader()
     reader._get_json = lambda ep: (

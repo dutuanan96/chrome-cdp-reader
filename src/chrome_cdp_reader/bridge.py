@@ -172,6 +172,51 @@ class ChromeReader:
             raise CDPError(f"JS exception: {result['exceptionDetails']}")
         return result.get("result", {}).get("value")
 
+    def read_text(self, ws: websocket.WebSocket, max_chars: int = 4000,
+                  timeout: float = 10) -> Dict[str, Any]:
+        """Read document.body.innerText, truncated INSIDE the browser before
+        the JSON leaves via CDP (reduces WebSocket payload, serialization cost
+        and Python memory on large pages).
+
+        Args:
+            ws: An open tab WebSocket (Page + Runtime already enabled).
+            max_chars: Max characters to keep. Must be a positive int.
+            timeout: Per-evaluate bound.
+
+        Returns:
+            {"text": str, "textLength": int, "truncated": bool}
+
+        Raises:
+            TypeError: if max_chars is not an int (bool is rejected).
+            ValueError: if max_chars < 1.
+        """
+        if isinstance(max_chars, bool) or not isinstance(max_chars, int):
+            raise TypeError("max_chars must be an integer")
+        if max_chars < 1:
+            raise ValueError("max_chars must be > 0")
+        expr = (
+            "(() => {"
+            f"  const maxChars = {max_chars};"
+            "  const raw = document.body ? document.body.innerText : '';"
+            "  return JSON.stringify({"
+            "    text: raw.slice(0, maxChars),"
+            "    textLength: raw.length,"
+            "    truncated: raw.length > maxChars"
+            "  });"
+            "})()"
+        )
+        raw = self.cdp_js(ws, expr, timeout=timeout)
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (ValueError, json.JSONDecodeError):
+                return {
+                    "text": raw[:max_chars],
+                    "textLength": len(raw),
+                    "truncated": len(raw) > max_chars,
+                }
+        return raw
+
     def create_tab(self, url: str = "about:blank") -> str:
         """
         Create a new tab (without navigating to a real URL yet).
@@ -200,6 +245,85 @@ class ChromeReader:
 
         return target_id
 
+    def _drain_old_events(self, ws: websocket.WebSocket) -> None:
+        """Drop stale buffered events (e.g. from about:blank) before navigating
+        a fresh URL, so a leftover load event cannot satisfy the next wait."""
+        queue = self._get_event_queue(ws)
+        queue.clear()
+
+    def _wait_navigation_ready(self, ws: websocket.WebSocket,
+                               nav_frame: Optional[str],
+                               nav_loader: Optional[str],
+                               timeout: float = 15) -> bool:
+        """Wait for navigation completion via lifecycle events, correlated by
+        frameId + loaderId (cross-document) or navigatedWithinDocument
+        (same-document / fragment / History API).
+
+        Falls back to the legacy _wait_load_event when lifecycle events were
+        not enabled (older protocol) or produced no events.
+
+        Uses a single overall deadline (no stacked timeouts).
+        """
+        deadline = time.monotonic() + timeout
+        saw_lifecycle = False
+        queue = self._get_event_queue(ws)
+        # Also inspect already-buffered events first.
+        while queue:
+            msg = queue.popleft()
+            method = msg.get("method")
+            if not method:
+                continue
+            params = msg.get("params", {})
+            if method == "Page.lifecycleEvent":
+                saw_lifecycle = True
+                if params.get("frameId") != nav_frame:
+                    continue
+                if nav_loader and params.get("loaderId") != nav_loader:
+                    continue
+                if params.get("name") in ("DOMContentLoaded", "load"):
+                    return True
+            elif method == "Page.navigatedWithinDocument":
+                if params.get("frameId") == nav_frame:
+                    return True
+            elif method == "Page.loadEventFired":
+                # Legacy fallback: a plain load event still indicates the page
+                # finished loading. Accept it (lifecycle correlation is best
+                # effort; loadEventFired is the pre-lifecycle signal).
+                return True
+        while time.monotonic() < deadline:
+            ws.settimeout(min(deadline - time.monotonic(), 5.0))
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            try:
+                msg = json.loads(raw)
+            except (ValueError, json.JSONDecodeError):
+                continue
+            method = msg.get("method")
+            if not method:
+                continue
+            params = msg.get("params", {})
+            if method == "Page.lifecycleEvent":
+                saw_lifecycle = True
+                if params.get("frameId") != nav_frame:
+                    continue
+                if nav_loader and params.get("loaderId") != nav_loader:
+                    continue
+                if params.get("name") in ("DOMContentLoaded", "load"):
+                    return True
+            elif method == "Page.navigatedWithinDocument":
+                if params.get("frameId") == nav_frame:
+                    return True
+            elif method == "Page.loadEventFired":
+                # Legacy fallback: a plain load event still indicates the page
+                # finished loading. Accept it (lifecycle correlation is best
+                # effort; loadEventFired is the pre-lifecycle signal).
+                return True
+        if not saw_lifecycle:
+            return self._wait_load_event(ws, timeout=max(0.1, deadline - time.monotonic()))
+        return False
+
     def _prepare_tab(self, url: str, timeout: int = 15,
                      selector: Optional[str] = None,
                      reuse_existing: bool = False) -> websocket.WebSocket:
@@ -209,9 +333,12 @@ class ChromeReader:
         Flow:
           1. Reuse an existing matching tab OR create a new one on about:blank.
           2. Connect the tab WebSocket, enable Page + Runtime events.
-          3. If a new tab, navigate exactly ONCE via Page.navigate (no reload).
-          4. Wait for Page.loadEventFired by draining raw ws messages (the
-             load event is NOT swallowed by cdp_send's ID-matching loop).
+          3. If a new tab, enable lifecycle events, drain stale events, then
+             navigate exactly ONCE via Page.navigate.
+          4. Wait for navigation completion correlated by frameId + loaderId
+             (Page.lifecycleEvent) or same-document navigation
+             (Page.navigatedWithinDocument). Legacy loadEventFired fallback
+             when lifecycle events are unavailable.
           5. Poll document.readyState until interactive/complete.
           6. If `selector` given, wait for it (SPA render); on timeout fall
              back to DOM text instead of hanging.
@@ -248,6 +375,7 @@ class ChromeReader:
 
         ws = self._connect(ws_url)
         ws._target_id = tab_id  # remember for cleanup (close tab after read)
+        ws._owns_target = True  # only close tabs we created
         deadline = time.monotonic() + timeout
 
         def remaining():
@@ -257,19 +385,42 @@ class ChromeReader:
             # 2. Enable events BEFORE navigating
             self.cdp_send(ws, "Page.enable", timeout=min(5, remaining()))
             self.cdp_send(ws, "Runtime.enable", timeout=min(5, remaining()))
+            # B2: enable lifecycle events (best-effort; older protocol may lack it)
+            try:
+                self.cdp_send(ws, "Page.setLifecycleEventsEnabled",
+                              {"enabled": True}, timeout=min(5, remaining()))
+            except Exception:
+                pass
 
             # 3. Navigate exactly once (no reload)
             if navigate:
-                self.cdp_send(ws, "Page.navigate", {"url": url},
-                              timeout=min(20, remaining()))
+                # B2: drain stale events from about:blank so they cannot satisfy
+                # the upcoming navigation wait.
+                self._drain_old_events(ws)
+                nav = self.cdp_send(ws, "Page.navigate", {"url": url},
+                                    timeout=min(20, remaining()))
+                # B2: surface navigation failures / downloads immediately.
+                if nav.get("errorText"):
+                    raise CDPError(f"Navigation failed for {url}: {nav['errorText']}")
+                if nav.get("isDownload"):
+                    raise CDPError(f"Navigation for {url} became a download (isDownload=true)")
+                nav_frame = nav.get("frameId")
+                nav_loader = nav.get("loaderId")  # empty for same-document
 
-            # 4. Wait for load event (only when we actually navigated).
-            if navigate:
-                load_ok = self._wait_load_event(ws, timeout=remaining())
-                if not load_ok:
+                # 4. Wait for navigation completion (correlated, single deadline)
+                ready = self._wait_navigation_ready(
+                    ws, nav_frame, nav_loader, timeout=remaining())
+                if not ready:
                     raise CDPError(
-                        f"Page did not fire loadEventFired for {url} "
-                        f"within {timeout}s"
+                        f"Navigation not ready for {url} within {timeout}s"
+                    )
+            else:
+                # Reusing an existing tab that already shows the URL: just
+                # confirm it is settled.
+                if not self._wait_ready_state(ws, timeout=remaining()):
+                    raise CDPError(
+                        f"Page readyState never reached interactive/complete "
+                        f"for {url} within {timeout}s"
                     )
 
             # 5. Poll readyState (must reach interactive/complete)
@@ -292,6 +443,7 @@ class ChromeReader:
                             f"too short after {timeout}s for {url}"
                         )
         except Exception:
+            self._close_tab(ws)
             ws.close()
             raise
 
