@@ -11,7 +11,8 @@ import base64
 import logging
 import os
 from collections import deque
-from typing import Optional, Dict, Any, List
+from contextlib import contextmanager
+from typing import Optional, Dict, Any, List, Iterator
 from urllib.request import urlopen
 from urllib.error import URLError
 
@@ -55,17 +56,20 @@ class ChromeReader:
         self.cdp_url = cdp_url
         self._browser_ws_url = None
         self._tabs = []
+        self._owned_target_ids = set()  # targets we created, for stale cleanup
 
-    def _get_json(self, endpoint: str) -> Dict[str, Any]:
+    def _get_json(self, endpoint: str, *, timeout: float = 5.0) -> Dict[str, Any]:
         """Fetch JSON from CDP HTTP endpoint."""
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
         url = f"{self.cdp_url}{endpoint}"
         try:
-            with urlopen(url, timeout=5) as response:
+            with urlopen(url, timeout=timeout) as response:
                 return json.loads(response.read().decode())
         except URLError as e:
             raise ConnectionError(
                 f"Cannot connect to Chrome at {self.cdp_url}. "
-                "Make sure Chrome is running with --remote-debugging-port=9222. "
+                f"Make sure Chrome is running with --remote-debugging-port=9222. "
                 f"Error: {e}"
             )
 
@@ -92,7 +96,7 @@ class ChromeReader:
                 return tab
         return None
 
-    def _connect(self, ws_url: str, timeout: int = 15) -> websocket.WebSocket:
+    def _connect(self, ws_url: str, timeout: float = 15) -> websocket.WebSocket:
         """
         Connect to a WebSocket URL.
 
@@ -324,9 +328,30 @@ class ChromeReader:
             return self._wait_load_event(ws, timeout=max(0.1, deadline - time.monotonic()))
         return False
 
+    def _find_reusable_tab(
+        self, url: str, *, url_prefix: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Find a reusable page target by exact URL or URL prefix.
+
+        Only `type == "page"` targets are considered. A prefix match lets
+        SPA URLs (Gmail changes its `#fragment` constantly) reuse one tab
+        instead of spawning a new one on every navigation.
+        """
+        for tab in self.get_tabs():
+            if tab.get("type") != "page":
+                continue
+            tab_url = tab.get("url", "")
+            if url_prefix is not None:
+                if tab_url.startswith(url_prefix):
+                    return tab
+            elif url in tab_url:
+                return tab
+        return None
+
     def _prepare_tab(self, url: str, timeout: int = 15,
                      selector: Optional[str] = None,
-                     reuse_existing: bool = False) -> websocket.WebSocket:
+                     reuse_existing: bool = False,
+                     reuse_url_prefix: Optional[str] = None) -> websocket.WebSocket:
         """
         Robust tab lifecycle (core reliability primitive).
 
@@ -358,8 +383,9 @@ class ChromeReader:
             close it (use a try/finally).
         """
         # 1. Tab selection
+        created_target = False
         if reuse_existing:
-            tab = self.find_tab(url)
+            tab = self._find_reusable_tab(url, url_prefix=reuse_url_prefix)
             if tab:
                 ws_url = tab.get("webSocketDebuggerUrl", "")
                 tab_id = tab.get("id", "")
@@ -367,15 +393,28 @@ class ChromeReader:
             else:
                 tab_id = self.create_tab("about:blank")
                 ws_url = self._get_tab_ws(tab_id)
+                created_target = True
+                self._owned_target_ids.add(tab_id)
                 navigate = True
         else:
             tab_id = self.create_tab("about:blank")
             ws_url = self._get_tab_ws(tab_id)
+            created_target = True
+            self._owned_target_ids.add(tab_id)
             navigate = True
 
-        ws = self._connect(ws_url)
+        ws = None
+        try:
+            ws = self._connect(ws_url)
+        except Exception:
+            # Gap: createTarget succeeded but connect failed before _target_id
+            # was attached. Close by id so the about:blank tab is not leaked.
+            if created_target and tab_id:
+                self._close_target_by_id(tab_id, timeout=2.0)
+            raise
+
         ws._target_id = tab_id  # remember for cleanup (close tab after read)
-        ws._owns_target = True  # only close tabs we created
+        ws._owns_target = created_target  # only close tabs WE created; reused tabs stay open
         deadline = time.monotonic() + timeout
 
         def remaining():
@@ -530,25 +569,89 @@ class ChromeReader:
             time.sleep(0.5)
         return False
 
-    def _close_tab(self, ws: websocket.WebSocket) -> None:
-        """Close the tab we opened (best-effort) to avoid target buildup."""
-        target_id = getattr(ws, "_target_id", None)
-        if target_id:
+    def _target_exists(self, target_id: str, *, timeout: float = 0.8) -> bool:
+        """Return True if a target with target_id is still listed by Chrome."""
+        try:
+            targets = self._get_json("/json/list", timeout=timeout)
+        except Exception:
+            # Unknown -> treat as still present so we never claim false success.
+            return True
+        return any(
+            isinstance(t, dict) and t.get("id") == target_id for t in targets
+        )
+
+    def _close_target_by_id(self, target_id: str, *, timeout: float = 2.0) -> bool:
+        """Close a target by id WITHOUT a page WebSocket (for the create->connect
+        gap, or stale cleanup). Uses Target.closeTarget over a browser WebSocket.
+        """
+        if not target_id:
+            return False
+        try:
+            browser_ws = self._get_json("/json/version", timeout=min(timeout, 1.0)
+                                        ).get("webSocketDebuggerUrl", "")
+            if not browser_ws:
+                return False
+            bw = self._connect(browser_ws, timeout=max(0.5, timeout))
             try:
-                browser_ws = self._get_json("/json/version").get(
-                    "webSocketDebuggerUrl", "")
-                if browser_ws:
-                    bw = self._connect(browser_ws, timeout=5)
-                    try:
-                        self.cdp_send(bw, "Target.closeTarget",
-                                      {"targetId": target_id}, timeout=5)
-                    finally:
-                        bw.close()
-            except Exception:
-                pass
+                self.cdp_send(bw, "Target.closeTarget",
+                              {"targetId": target_id}, timeout=max(0.5, timeout))
+            finally:
+                bw.close()
+            return True
+        except Exception as exc:
+            logger.debug("closeTarget by id failed for %s: %s", target_id, exc)
+            return False
+
+    def _close_tab(self, ws: websocket.WebSocket, *,
+                   timeout: float = 3.0) -> bool:
+        """Close an OWNED page and verify it disappeared.
+
+        Close order:
+          1. Page.close on the existing page WebSocket (no extra connection).
+          2. Fallback: Target.closeTarget via browser WebSocket.
+        Reused/user tabs (no `_owns_target`) are never closed.
+
+        Returns True if the target is gone (or was never owned), False on failure.
+        Logs a warning with the target id when closure fails (never silent).
+        """
+        target_id = getattr(ws, "_target_id", None)
+        owns = bool(getattr(ws, "_owns_target", False))
+
+        if not target_id:
+            logger.warning(
+                "Cannot close tab: WebSocket has no _target_id metadata. "
+                "Use open_tab() instead of manual create_tab/_connect."
+            )
+            return False
+        if not owns:
+            logger.debug("Leaving target %s open (not owned by this op).", target_id)
+            return True
+        if not self._target_exists(target_id, timeout=0.5):
+            return True  # already gone
+
+        # Step 1: graceful Page.close on the tab's own WebSocket.
+        try:
+            self.cdp_send(ws, "Page.close", timeout=min(0.8, max(0.1, timeout)))
+        except Exception as exc:
+            # Socket may close before the response arrives; not proof of failure.
+            logger.debug("Page.close raised for %s: %s", target_id, exc)
+
+        if not self._target_exists(target_id, timeout=0.5):
+            return True
+
+        # Step 2: fallback via browser WebSocket.
+        if self._close_target_by_id(target_id, timeout=max(0.5, timeout)):
+            if not self._target_exists(target_id, timeout=0.5):
+                return True
+
+        logger.warning("Target %s could not be closed within %.1fs.", target_id, timeout)
+        return False
 
     def read(self, url: str, wait: int = 15,
-             selector: Optional[str] = None) -> Dict[str, Any]:
+             selector: Optional[str] = None, *,
+             reuse_existing: bool = False,
+             reuse_url_prefix: Optional[str] = None,
+             close_after: bool = True) -> Dict[str, Any]:
         """
         Read content from a URL using the reliable tab lifecycle.
 
@@ -556,12 +659,19 @@ class ChromeReader:
             url: URL to read
             wait: Max seconds for load event + selector wait
             selector: Optional CSS selector to wait for (SPA content)
+            reuse_existing: Reuse an existing matching tab instead of opening
+                a new one (generic read keeps this False by default).
+            reuse_url_prefix: When reuse_existing, match by URL prefix (SPA
+                URLs change their fragment, so exact match would reopen).
+            close_after: Close the tab we opened after reading. A reused tab
+                is never closed regardless of this flag.
 
         Returns:
             Dictionary with page content
         """
         ws = self._prepare_tab(url, timeout=wait, selector=selector,
-                               reuse_existing=False)
+                               reuse_existing=reuse_existing,
+                               reuse_url_prefix=reuse_url_prefix)
         try:
             content = self.cdp_js(ws, """
                 JSON.stringify({
@@ -580,8 +690,86 @@ class ChromeReader:
             """)
             return json.loads(content) if content else {}
         finally:
-            self._close_tab(ws)
+            if close_after:
+                self._close_tab(ws)
             ws.close()
+
+    @contextmanager
+    def open_tab(self, url: str, *, timeout: int = 15,
+                 selector: Optional[str] = None,
+                 reuse_existing: bool = False,
+                 reuse_url_prefix: Optional[str] = None,
+                 close_after: bool = True) -> Iterator[Any]:
+        """Open/reuse a page and guarantee cleanup on the normal path.
+
+        - A target created by this op is closed when close_after=True.
+        - A reused target is never closed by this manager.
+        - close_after=False keeps a newly created managed target open
+          (e.g. one persistent Gmail tab reused by later calls).
+
+        Use this instead of manually calling create_tab()/_connect()/_close_tab().
+        """
+        ws = self._prepare_tab(
+            url, timeout=timeout, selector=selector,
+            reuse_existing=reuse_existing, reuse_url_prefix=reuse_url_prefix,
+        )
+        target_id = getattr(ws, "_target_id", None)
+        owns_target = bool(getattr(ws, "_owns_target", False))
+        try:
+            yield ws
+        finally:
+            try:
+                if close_after and owns_target:
+                    self._close_tab(ws, timeout=3.0)
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    logger.debug("Failed to close page WebSocket for %s", target_id)
+
+    def cleanup_stale_tabs(self, *, stale_after: float = 60.0,
+                           dry_run: bool = False) -> Dict[str, Any]:
+        """Small stale-tab cleanup. Only closes about:blank targets that THIS
+        package created but left behind (tracked in ``_owned_target_ids``), and
+        only once their owner is gone / they are older than ``stale_after``.
+
+        Does NOT close user tabs, does NOT close Gmail tabs, does NOT use a
+        registry file or PID tracking.
+        """
+        if stale_after < 0:
+            raise ValueError("stale_after must be non-negative")
+        targets = {t.get("id"): t for t in self.get_tabs()
+                   if isinstance(t, dict) and t.get("id")}
+        report: Dict[str, Any] = {"closed": [], "wouldClose": [],
+                                  "skipped": [], "errors": []}
+
+        for target_id in list(self._owned_target_ids):
+            if target_id not in targets:
+                self._owned_target_ids.discard(target_id)
+                continue
+            item = targets[target_id]
+            if item.get("type") != "page":
+                self._owned_target_ids.discard(target_id)
+                continue
+            if item.get("url") != "about:blank":
+                # Only about:blank leftovers are safe to auto-close.
+                report["skipped"].append({"targetId": target_id,
+                                          "reason": "not_about_blank"})
+                continue
+            if dry_run:
+                report["wouldClose"].append(target_id)
+                continue
+            if self._close_target_by_id(target_id, timeout=1.5):
+                if not self._target_exists(target_id, timeout=0.5):
+                    self._owned_target_ids.discard(target_id)
+                    report["closed"].append(target_id)
+                else:
+                    report["errors"].append({"targetId": target_id,
+                                             "reason": "close_failed"})
+            else:
+                report["errors"].append({"targetId": target_id,
+                                         "reason": "close_failed"})
+        return report
 
     def screenshot(self, url: str, output: str = "screenshot.jpg",
                    wait: int = 15, quality: int = 80) -> str:
@@ -623,7 +811,13 @@ class ChromeReader:
 
     def read_gmail(self, search: str = "", wait: int = 15) -> Dict[str, Any]:
         """
-        Read Gmail inbox.
+        Read Gmail inbox, reusing ONE persistent Gmail tab.
+
+        Reuses an existing tab whose URL starts with
+        ``https://mail.google.com/mail/`` (Gmail is an SPA and changes its
+        ``#fragment`` constantly, so we match by prefix, not exact URL). If no
+        such tab exists, one is created. The tab is intentionally kept open
+        after reading so the next call reuses it — no tab buildup.
 
         Args:
             search: Search query (optional, URL-encoded automatically)
@@ -639,7 +833,14 @@ class ChromeReader:
             url = "https://mail.google.com/mail/u/0/#inbox"
 
         # Gmail is an SPA: wait for its main content selector, fall back to DOM.
-        return self.read(url, wait=wait, selector='div[role="main"]')
+        # reuse_existing + prefix match keeps a single tab alive across calls;
+        # close_after=False leaves that tab open for the next invocation.
+        return self.read(
+            url, wait=wait, selector='div[role="main"]',
+            reuse_existing=True,
+            reuse_url_prefix="https://mail.google.com/mail/",
+            close_after=False,
+        )
 
     def read_zalo(self, wait: int = 15) -> Dict[str, Any]:
         """Read Zalo messages (SPA: wait for app mount)."""
