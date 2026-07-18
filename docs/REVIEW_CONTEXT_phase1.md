@@ -60,11 +60,10 @@ reviewer must check are preserved:
 ### Current SHAs
 - PR #8 base/merge: `e09443b` (baseline) → merge `d8d64733…`
 - PR #9 base: `d8d64733…` (post #8)
-- PR #9 head (Round 4): `f69e63961b1b898fae9f1d34cd3c1dd9ed4fd992` — produced after
-  fixing all 7 Round-3/4 blockers (deadline E2E budgeting of every helper, method-aware CDP
-  error taxonomy, strict lifecycle edge cases, about:blank-only scheme,
-  screenshot no-replace + backward-compat str return, TargetHandle immutability
-  in open_tab cleanup).
+- PR #9 head (Round 5): `aa0b70099fb516468c4c5b5986934dfc51615d1a` — produced after
+  fixing the 3 Round-5 failure-path blockers (create_tab shared Deadline,
+  method-aware cdp_send timeout + send failure, lifecycle fallback only on
+  protocol-unsupported) plus deterministic regression tests.
 
 ### Round 3 (all 6 blockers fixed)
 1. **B1 CLI bounded read end-to-end** — `cli.read` forwards `max_chars` to
@@ -274,6 +273,30 @@ are intentionally NOT here — they shipped in PR #8.)
 5. **Unknown internal errors exit 70** via `exit_code_for()` for all exceptions
    caught in the CLI.
 
+### Round 5 (3 failure-path blockers fixed)
+After the Round-4 live smoke passed the happy path, review surfaced 3 gaps in
+the failure paths (not covered by success smoke):
+1. **create_tab shared Deadline.** Previously each of `_get_json`/`_connect`/
+   `cdp_send` used `min(timeout, N)` independently, so sequential steps could
+   sum past the budget. Now `create_tab` builds one `Deadline(timeout)` and
+   passes `budget.bounded(N)` to each step, so the TOTAL cannot exceed the
+   caller's budget. `test_create_tab_shared_deadline_does_not_exceed_budget`
+   proves the connect step receives only the real remaining slice.
+2. **Method-aware cdp_send timeout + send failure.** `ws.send` is now inside
+   `try` → `WebSocketException` → `ConnectionError`. On timeout, the error type
+   matches the method: `Runtime.evaluate`→`EvaluationError`,
+   `Page.navigate`→`NavigationTimeoutError`,
+   `Target.createTarget`/`attachToTarget`/`closeTarget`/`Page.close`→
+   `TargetError`; other methods→`EvaluationError`. No more blanket
+   `NavigationTimeoutError`. `test_cdp_send_*_timeout_is_*` cover each.
+3. **Lifecycle fallback only on protocol-unsupported.** The
+   `Page.setLifecycleEventsEnabled` failure used `except Exception` and silently
+   fell back for ANY error (timeout, socket drop, malformed response). Now it
+   falls back ONLY when the error text confirms the command is unsupported;
+   `ConnectionError`/`NavigationTimeoutError`/`ExtractionError`/unexpected all
+   propagate. `test_lifecycle_fallback_on_unsupported_protocol` (fallback) and
+   `test_lifecycle_propagation_on_*` (socket/timeout/malformed) cover both.
+
 ---
 
 ## 5. REVIEW CHECKLIST (run these)
@@ -290,7 +313,7 @@ are intentionally NOT here — they shipped in PR #8.)
 - [ ] `validate_scheme` called at core boundary (blocks file/javascript/data)
 - [ ] `TargetHandle` used at runtime: created tab `owned=True`, reused `owned=False` (default); `_close_tab` consumes handle
 - [ ] `tests/test_round3.py` present; covers CLI bounded read, TargetHandle runtime, error taxonomy runtime, create_tab validation, screenshot hardening
-- [ ] 102 non-live tests pass; live tests marked and excluded from matrix
+- [ ] 143 non-live tests pass; live tests marked and excluded from matrix
 - [ ] No flaky/network-dependent unit tests
 
 **Docs:**
