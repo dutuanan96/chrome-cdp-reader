@@ -66,6 +66,19 @@ class ExtractionError(ChromeCDPReaderError):
     """A structured extractor failed to produce its schema."""
 
 
+class UnsupportedMethodError(ChromeCDPReaderError):
+    """The CDP target does not implement the requested method.
+
+    Mapped from the protocol error code -32601 (method not found). Used to
+    decide whether a legacy fallback is safe (e.g. lifecycle events on older
+    Chrome) instead of guessing from free-text error messages.
+    """
+
+    def __init__(self, message: str = "", *, code: int = -32601):
+        super().__init__(message)
+        self.code = code
+
+
 # Stable CLI exit codes. Never reuse 0 (success) or 1 (uncaught).
 EXIT_CODES: dict[type, int] = {
     InvalidInputError: 2,
@@ -79,6 +92,7 @@ EXIT_CODES: dict[type, int] = {
     EvaluationError: 23,
     PolicyDeniedError: 30,
     ExtractionError: 40,
+    UnsupportedMethodError: 23,
     ChromeCDPReaderError: 70,
 }
 

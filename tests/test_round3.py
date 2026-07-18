@@ -32,9 +32,10 @@ from chrome_cdp_reader.errors import (
     EvaluationError,
     ExtractionError,
     InvalidInputError,
-    NavigationTimeoutError,
     NavigationError,
+    NavigationTimeoutError,
     TargetError,
+    UnsupportedMethodError,
 )
 from chrome_cdp_reader.models import TargetHandle
 from chrome_cdp_reader.url_validation import validate_scheme
@@ -479,6 +480,27 @@ def test_cdp_malformed_response_maps_to_extraction_error():
         reader.cdp_send(ws, "Runtime.evaluate", {}, timeout=5)
 
 
+def test_cdp_error_unsupported_method_code_maps_to_unsupported_method_error():
+    ws = _scripted_ws_with_response(
+        json.dumps({"id": 1, "error": {"code": -32601,
+                                        "message": "Method not found"}}))
+    reader = ChromeReader()
+    with pytest.raises(UnsupportedMethodError) as excinfo:
+        reader.cdp_send(ws, "Page.setLifecycleEventsEnabled", {}, timeout=5)
+    assert excinfo.value.code == -32601
+
+
+def test_cdp_error_other_code_does_not_map_to_unsupported():
+    ws = _scripted_ws_with_response(
+        json.dumps({"id": 1, "error": {"code": -32000,
+                                        "message": "Method not found"}}))
+    reader = ChromeReader()
+    # -32000 is not -32601 -> stays a normal method-aware error, not
+    # UnsupportedMethodError.
+    with pytest.raises((TargetError, EvaluationError, NavigationError)):
+        reader.cdp_send(ws, "Target.createTarget", {"url": "x"}, timeout=5)
+
+
 def test_strict_lifecycle_rejects_wrong_loader():
     from unittest.mock import Mock as _M
     reader = ChromeReader()
@@ -677,14 +699,35 @@ def _reader_for_lifecycle(raise_method, exc):
 
 
 def test_lifecycle_fallback_on_unsupported_protocol():
-    """A protocol-confirmed 'not supported' error falls back to legacy
+    """A protocol -32601 (method not found) error falls back to legacy
     loadEventFired (lifecycle_enabled stays False)."""
     reader = _reader_for_lifecycle(
         "Page.setLifecycleEventsEnabled",
-        EvaluationError("Command Page.setLifecycleEventsEnabled is not supported"))
+        UnsupportedMethodError("Method not found", code=-32601))
     # Should NOT raise — unsupported lifecycle is a benign fallback.
     ws = reader._prepare_tab("https://example.com", timeout=5)
     assert ws is not None
+
+
+def test_lifecycle_fallback_on_unsupported_protocol_any_message():
+    """The fallback keys on the -32601 code, NOT the message text. Even an
+    unrelated message with code -32601 falls back; a different code with the
+    same text must propagate."""
+    reader = _reader_for_lifecycle(
+        "Page.setLifecycleEventsEnabled",
+        UnsupportedMethodError("something totally different", code=-32601))
+    ws = reader._prepare_tab("https://example.com", timeout=5)
+    assert ws is not None
+
+
+def test_lifecycle_no_fallback_on_other_error_code():
+    """Same message text but a non--32601 code (e.g. -32000) must propagate."""
+    reader = _reader_for_lifecycle(
+        "Page.setLifecycleEventsEnabled",
+        # code != -32601 -> not an unsupported-method signal
+        TargetError("Command is not supported"))
+    with pytest.raises(TargetError):
+        reader._prepare_tab("https://example.com", timeout=5)
 
 
 def test_lifecycle_propagation_on_socket_failure():

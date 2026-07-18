@@ -28,6 +28,7 @@ from chrome_cdp_reader.errors import (
     NavigationError,
     NavigationTimeoutError,
     TargetError,
+    UnsupportedMethodError,
 )
 
 from chrome_cdp_reader.models import TargetHandle
@@ -186,6 +187,13 @@ class ChromeReader:
                 if "error" in msg:
                     err = msg["error"]
                     text = err.get("message", err)
+                    code = err.get("code")
+                    # Protocol-aware: -32601 = method not found. Raise a typed
+                    # UnsupportedMethodError (carries the code) so callers can
+                    # decide on a safe fallback without guessing from text.
+                    if code == -32601:
+                        raise UnsupportedMethodError(
+                            f"CDP method {method} not supported: {text}")
                     # Method-aware error taxonomy (B2/R5).
                     if method == "Runtime.evaluate":
                         raise EvaluationError(f"CDP error on {method}: {text}")
@@ -523,18 +531,12 @@ class ChromeReader:
                 self.cdp_send(ws, "Page.setLifecycleEventsEnabled",
                               {"enabled": True}, timeout=min(5, remaining()))
                 lifecycle_enabled = True
-            except ChromeCDPReaderError as exc:
-                # Only fall back to the legacy loadEventFired path when the
-                # protocol itself reports the command is unsupported. Any
-                # other failure (socket error, timeout, malformed response,
-                # connection drop) MUST propagate — swallowing it would hide
-                # a real reliability problem (R5/B3).
-                msg = str(exc).lower()
-                if "not supported" in msg or "unknown method" in msg \
-                        or "command is not" in msg:
-                    lifecycle_enabled = False
-                else:
-                    raise
+            except UnsupportedMethodError:
+                # Protocol confirms the method is not implemented on this
+                # target/Chrome version → safe to use the legacy
+                # loadEventFired fallback. Any other error (ConnectionError,
+                # timeout, malformed response, unexpected) propagates.
+                lifecycle_enabled = False
 
             # 3. Navigate exactly once (no reload)
             if navigate:
