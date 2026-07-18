@@ -39,3 +39,13 @@ def test_unknown_exception_defaults_to_70():
 def test_module_imports_clean():
     # errors.py must not raise on import; CDPError comes from bridge.
     assert errors.CDPError is not None
+
+
+def test_unsupported_method_error_exported_from_facade():
+    # Public typed error taxonomy must be importable from the package facade.
+    from chrome_cdp_reader import UnsupportedMethodError
+    from chrome_cdp_reader import exit_code_for
+    assert exit_code_for(UnsupportedMethodError("x")) == 23
+    assert UnsupportedMethodError("x").code == -32601
+    # Carries an arbitrary message with the protocol code.
+    assert UnsupportedMethodError("Method not found", code=-32601).code == -32601

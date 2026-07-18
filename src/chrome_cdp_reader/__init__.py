@@ -29,6 +29,7 @@ from chrome_cdp_reader.errors import (
     PolicyDeniedError,
     InvalidInputError,
     ExtractionError,
+    UnsupportedMethodError,
     exit_code_for,
 )
 from chrome_cdp_reader.deadlines import Deadline
@@ -42,6 +43,6 @@ __all__ = [
     "ConnectionError", "PortConflictError", "UnsafeProcessError",
     "NavigationError", "NavigationTimeoutError", "DownloadNavigationError",
     "TargetError", "EvaluationError", "PolicyDeniedError",
-    "InvalidInputError", "ExtractionError", "exit_code_for",
+    "InvalidInputError", "ExtractionError", "UnsupportedMethodError", "exit_code_for",
     "Deadline", "TargetHandle", "validate_scheme",
 ]

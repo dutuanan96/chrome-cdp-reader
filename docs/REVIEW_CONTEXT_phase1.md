@@ -61,7 +61,7 @@ reviewer must check are preserved:
 ### Current SHAs
 - PR #8 base/merge: `e09443b` (baseline) → merge `d8d64733…`
 - PR #9 base: `d8d64733…` (post #8)
-- PR #9 head (Round 5): `6a5c44acb302323e06057f6ec75960e700c87439` — produced after
+- PR #9 head (Round 5): `2f33029250478228132d9a467a50486b26b761ec` — produced after
   finalising the 3 Round-5 failure-path blockers (create_tab shared Deadline,
   method-aware cdp_send timeout + send failure, protocol-aware lifecycle
   fallback via UnsupportedMethodError(-32601)) plus deterministic regression
