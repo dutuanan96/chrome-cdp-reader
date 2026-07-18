@@ -210,7 +210,8 @@ def test_screenshot_uses_prepare_tab(monkeypatch, tmp_path):
     out = reader.screenshot("https://example.com",
                             output=str(tmp_path / "s.png"), wait=5)
     assert _navigate_methods(ws) == ["Page.navigate"]
-    assert out.endswith(".png")
+    assert out["path"].endswith(".png")
+    assert out["format"] == "png"
 
 
 # --- 7. Existing matching tab reused without re-navigation ------------------

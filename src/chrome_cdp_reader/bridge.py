@@ -18,23 +18,27 @@ from urllib.error import URLError
 
 import websocket
 
+from chrome_cdp_reader.errors import (
+    ChromeCDPReaderError,
+    ConnectionError,
+    DownloadNavigationError,
+    EvaluationError,
+    InvalidInputError,
+    NavigationError,
+    NavigationTimeoutError,
+    TargetError,
+)
+
 logger = logging.getLogger("chrome_cdp_reader")
 if os.environ.get("CRC_DEBUG"):
     logging.basicConfig(level=logging.DEBUG)
     logger.setLevel(logging.DEBUG)
 
 
-class CDPError(Exception):
-    """Base CDP error."""
-    pass
-
-class TabNotFoundError(CDPError):
-    """Tab not found."""
-    pass
-
-class ConnectionError(CDPError):
-    """Cannot connect to Chrome."""
-    pass
+# Backward compatibility: keep the old names importable from bridge.
+# CDPError = ChromeCDPReaderError so `except CDPError` still works everywhere.
+CDPError = ChromeCDPReaderError
+TabNotFoundError = TargetError
 
 
 class ChromeReader:
@@ -173,7 +177,7 @@ class ChromeReader:
             timeout=timeout,
         )
         if result.get("exceptionDetails"):
-            raise CDPError(f"JS exception: {result['exceptionDetails']}")
+            raise EvaluationError(f"JS exception: {result['exceptionDetails']}")
         return result.get("result", {}).get("value")
 
     def read_text(self, ws: websocket.WebSocket, max_chars: int = 4000,
@@ -245,7 +249,7 @@ class ChromeReader:
 
         target_id = result.get("targetId", "")
         if not target_id:
-            raise CDPError(f"Failed to create tab: {result}")
+            raise TargetError(f"Failed to create tab: {result}")
 
         return target_id
 
@@ -355,6 +359,11 @@ class ChromeReader:
         """
         Robust tab lifecycle (core reliability primitive).
 
+        SECURITY: the URL is validated at this core boundary so every caller
+        (read / screenshot / open_tab / CLI) is protected, not just one CLI
+        command. Dangerous schemes (file/javascript/data/...) are rejected
+        before any navigation.
+
         Flow:
           1. Reuse an existing matching tab OR create a new one on about:blank.
           2. Connect the tab WebSocket, enable Page + Runtime events.
@@ -382,6 +391,10 @@ class ChromeReader:
             An open WebSocket connected to the prepared tab. Caller must
             close it (use a try/finally).
         """
+        # 0. Validate the URL scheme at the core boundary (B1/security).
+        from chrome_cdp_reader.url_validation import validate_scheme
+        validate_scheme(url)
+
         # 1. Tab selection
         created_target = False
         if reuse_existing:
@@ -415,10 +428,11 @@ class ChromeReader:
 
         ws._target_id = tab_id  # remember for cleanup (close tab after read)
         ws._owns_target = created_target  # only close tabs WE created; reused tabs stay open
-        deadline = time.monotonic() + timeout
-
-        def remaining():
-            return max(0.0, deadline - time.monotonic())
+        # Phase 1: single monotonic Deadline shared by every navigation step.
+        # total wait can never exceed `timeout`; per-step bounds use bounded().
+        from chrome_cdp_reader.deadlines import Deadline
+        _deadline = Deadline(timeout)
+        remaining = _deadline.remaining  # callable -> float seconds left
 
         try:
             # 2. Enable events BEFORE navigating
@@ -440,9 +454,10 @@ class ChromeReader:
                                     timeout=min(20, remaining()))
                 # B2: surface navigation failures / downloads immediately.
                 if nav.get("errorText"):
-                    raise CDPError(f"Navigation failed for {url}: {nav['errorText']}")
+                    raise NavigationError(f"Navigation failed for {url}: {nav['errorText']}")
                 if nav.get("isDownload"):
-                    raise CDPError(f"Navigation for {url} became a download (isDownload=true)")
+                    raise DownloadNavigationError(
+                        f"Navigation for {url} became a download (isDownload=true)")
                 nav_frame = nav.get("frameId")
                 nav_loader = nav.get("loaderId")  # empty for same-document
 
@@ -450,21 +465,21 @@ class ChromeReader:
                 ready = self._wait_navigation_ready(
                     ws, nav_frame, nav_loader, timeout=remaining())
                 if not ready:
-                    raise CDPError(
+                    raise NavigationTimeoutError(
                         f"Navigation not ready for {url} within {timeout}s"
                     )
             else:
                 # Reusing an existing tab that already shows the URL: just
                 # confirm it is settled.
                 if not self._wait_ready_state(ws, timeout=remaining()):
-                    raise CDPError(
+                    raise NavigationTimeoutError(
                         f"Page readyState never reached interactive/complete "
                         f"for {url} within {timeout}s"
                     )
 
             # 5. Poll readyState (must reach interactive/complete)
             if not self._wait_ready_state(ws, timeout=remaining()):
-                raise CDPError(
+                raise NavigationTimeoutError(
                     f"Page readyState never reached interactive/complete "
                     f"for {url} within {timeout}s"
                 )
@@ -477,7 +492,7 @@ class ChromeReader:
                         ws, "document.body ? document.body.innerText.length : 0"
                     ) or 0
                     if text_len < 10:
-                        raise CDPError(
+                        raise NavigationTimeoutError(
                             f"Selector {selector!r} not found and DOM text is "
                             f"too short after {timeout}s for {url}"
                         )
@@ -651,7 +666,8 @@ class ChromeReader:
              selector: Optional[str] = None, *,
              reuse_existing: bool = False,
              reuse_url_prefix: Optional[str] = None,
-             close_after: bool = True) -> Dict[str, Any]:
+             close_after: bool = True,
+             max_chars: int = 4000) -> Dict[str, Any]:
         """
         Read content from a URL using the reliable tab lifecycle.
 
@@ -665,19 +681,24 @@ class ChromeReader:
                 URLs change their fragment, so exact match would reopen).
             close_after: Close the tab we opened after reading. A reused tab
                 is never closed regardless of this flag.
+            max_chars: Bound the returned text INSIDE the browser before it
+                leaves via CDP (B3: no full innerText crosses the wire).
 
         Returns:
-            Dictionary with page content
+            Dictionary with page content, including ``textLength`` and
+            ``truncated`` metadata.
         """
         ws = self._prepare_tab(url, timeout=wait, selector=selector,
                                reuse_existing=reuse_existing,
                                reuse_url_prefix=reuse_url_prefix)
         try:
-            content = self.cdp_js(ws, """
+            # B3: bounded text extraction happens in JS (bridge.read_text).
+            text_info = self.read_text(ws, max_chars=max_chars)
+            # Lightweight metadata (title/url/links) — links are sliced in JS.
+            meta = self.cdp_js(ws, """
                 JSON.stringify({
                     title: document.title,
                     url: window.location.href,
-                    text: document.body ? document.body.innerText : '',
                     links: Array.from(document.querySelectorAll('a')).slice(0, 50).map(a => ({
                         text: a.innerText.trim(),
                         href: a.href
@@ -688,7 +709,16 @@ class ChromeReader:
                     }))
                 })
             """)
-            return json.loads(content) if content else {}
+            meta = json.loads(meta) if meta else {}
+            return {
+                "title": meta.get("title", ""),
+                "url": meta.get("url", ""),
+                "text": text_info.get("text", ""),
+                "textLength": text_info.get("textLength", 0),
+                "truncated": text_info.get("truncated", False),
+                "links": meta.get("links", []),
+                "images": meta.get("images", []),
+            }
         finally:
             if close_after:
                 self._close_tab(ws)
@@ -772,28 +802,50 @@ class ChromeReader:
         return report
 
     def screenshot(self, url: str, output: str = "screenshot.jpg",
-                   wait: int = 15, quality: int = 80) -> str:
+                   wait: int = 15, quality: int = 80,
+                   *, overwrite: bool = False) -> Dict[str, Any]:
         """
         Take a screenshot of a URL using the same lifecycle as read().
 
         Args:
-            url: URL to screenshot
-            output: Output file path. Format is chosen from the extension:
-                    .jpg/.jpeg -> JPEG (uses `quality`), .png -> PNG.
-            wait: Max seconds for page load
-            quality: JPEG quality (1-100), ignored for PNG
+            url: URL to screenshot (validated at the core boundary).
+            output: Output file path. ONLY .png, .jpg, .jpeg are accepted;
+                    any other extension (e.g. .bmp) is rejected — we never
+                    write a JPEG payload under a wrong extension.
+            wait: Max seconds for page load.
+            quality: JPEG quality (1-100), ignored for PNG. Rejected if
+                     outside that range.
+            overwrite: If False (default), refuse to clobber an existing file.
 
         Returns:
-            Path to saved screenshot
+            dict with path, format, byteSize and truncated-style metadata.
         """
+        import os
         import os.path as _osp
+
+        # --- Output hardening (Phase 1) ---
         ext = _osp.splitext(output)[1].lower()
-        is_png = ext in (".png",)
+        if ext not in (".png", ".jpg", ".jpeg"):
+            raise InvalidInputError(
+                f"screenshot output must end with .png/.jpg/.jpeg, got {ext!r}")
+        if not (1 <= int(quality) <= 100):
+            raise InvalidInputError("quality must be between 1 and 100")
+        if _osp.exists(output) and not overwrite:
+            raise InvalidInputError(f"output already exists (use overwrite=True): {output}")
+
+        out_dir = _osp.dirname(_osp.abspath(output))
+        if out_dir and not _osp.isdir(out_dir):
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as e:
+                raise InvalidInputError(f"cannot create output directory: {e}")
+
+        is_png = ext == ".png"
         capture_format = "png" if is_png else "jpeg"
 
         ws = self._prepare_tab(url, timeout=wait, reuse_existing=False)
         try:
-            params = {"format": capture_format}
+            params: Dict[str, Any] = {"format": capture_format}
             if not is_png:
                 params["quality"] = quality
             result = self.cdp_send(ws, "Page.captureScreenshot", params, timeout=15)
@@ -802,12 +854,16 @@ class ChromeReader:
                 img_data = base64.b64decode(result["data"])
                 with open(output, "wb") as f:
                     f.write(img_data)
-                return output
+                return {
+                    "path": output,
+                    "format": capture_format,
+                    "byteSize": len(img_data),
+                }
         finally:
             self._close_tab(ws)
             ws.close()
 
-        raise CDPError("Failed to take screenshot")
+        raise TargetError("Failed to take screenshot")
 
     def read_gmail(self, search: str = "", wait: int = 15) -> Dict[str, Any]:
         """
@@ -857,7 +913,7 @@ class ChromeReader:
         for tab in tabs:
             if tab.get("id") == tab_id:
                 return tab.get("webSocketDebuggerUrl", "")
-        raise TabNotFoundError(f"Tab {tab_id} not found")
+        raise TargetError(f"Tab {tab_id} not found")
 
 
 __all__ = ["ChromeReader", "CDPError", "TabNotFoundError"]

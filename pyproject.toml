@@ -52,6 +52,9 @@ packages = ["src/chrome_cdp_reader"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: tests that require a real Chrome debug instance on 127.0.0.1:9222",
+]
 
 [tool.ruff]
 line-length = 100
