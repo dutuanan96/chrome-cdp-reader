@@ -217,6 +217,7 @@ def test_screenshot_uses_prepare_tab(monkeypatch, tmp_path):
 def test_reuse_existing_tab_no_navigate():
     existing = [{
         "id": "T0",
+        "type": "page",
         "url": "https://example.com",
         "webSocketDebuggerUrl": "ws://existing",
     }]
@@ -231,6 +232,7 @@ def test_reuse_existing_tab_no_navigate():
 def test_reuse_existing_tab_navigates_when_url_differs():
     existing = [{
         "id": "T0",
+        "type": "page",
         "url": "https://other.com",
         "webSocketDebuggerUrl": "ws://existing",
     }]
