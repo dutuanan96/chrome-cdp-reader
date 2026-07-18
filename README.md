@@ -82,7 +82,31 @@ This will:
 On first launch, **log in once** to the sites you want to read. Cookies persist
 in the debug profile.
 
-### Usage
+### WSL ↔ Windows networking helpers (`scripts/`)
+
+When driving Chrome CDP from WSL2, the debug port is on the **Windows** side.
+Use the helpers in [`scripts/`](scripts/) so you never hand-edit paths or read
+`/etc/resolv.conf`:
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/launch_debug_chrome.ps1` | Open **or reuse** a dedicated debug Chrome. Verifies PID + name + command line, fails fast on an intruder, writes `state.json` to `%LOCALAPPDATA%\Temp`. |
+| `scripts/check_chrome_debug_wsl.sh` | WSL-side discovery. Probes mirrored `127.0.0.1:9222`, then NAT `gateway:9223`. Short timeouts. `--url` / `--export` / `--json`. |
+| `scripts/setup_wsl_portproxy.ps1` | Persistent `9223 → 9222` NAT portproxy **fallback** (admin only, firewall scoped to `vEthernet (WSL*)`). Only needed when mirrored networking is unavailable. |
+| `scripts/ROOT_CAUSE_AND_SETUP.md` | Why WSL NAT mode breaks `127.0.0.1`, and the run order. |
+
+Typical flow on Win11 + WSL2 (mirrored networking in `.wslconfig`):
+
+```powershell
+# Windows PowerShell
+.\scripts\launch_debug_chrome.ps1
+```
+```bash
+# WSL
+./scripts/check_chrome_debug_wsl.sh --export   # prints: export CRC_CDP_URL='http://127.0.0.1:9222'
+```
+
+
 
 ```bash
 # Read Gmail inbox
