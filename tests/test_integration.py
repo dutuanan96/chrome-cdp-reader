@@ -7,20 +7,22 @@ the real CDP path.
 """
 
 import os
+
 import pytest
-import urllib.request
+
 from chrome_cdp_reader.bridge import ChromeReader
+
+CDP = os.environ.get("CRC_CDP_URL", "http://127.0.0.1:9222")
 
 
 def _chrome_up() -> bool:
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=3) as r:
-            return r.status == 200
-    except Exception:
-        return False
+    # Correct probe: is_connected() returns False (not raise) when Chrome is
+    # down, so return its value directly — never swallow it as True.
+    return ChromeReader(CDP).is_connected()
 
 
-pytestmark = pytest.mark.skipif(not _chrome_up(), reason="Chrome debug not running on :9222")
+live = pytest.mark.live
+pytestmark = pytest.mark.skipif(not _chrome_up(), reason="Chrome debug not reachable")
 
 
 def test_connect_and_list_tabs():
