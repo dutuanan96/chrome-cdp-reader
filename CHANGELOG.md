@@ -87,5 +87,10 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   immutability, lifecycle fallback keys on the protocol code not text).
 - `tests/test_load_lifecycle.py` rewritten for strict correlation + typed
   errors.
-- Non-live suite: **147 passed, 4 live skipped, 2 `@pytest.mark.live`
+- Non-live suite: **148 passed, 4 live skipped, 2 `@pytest.mark.live`
   deselected** on Python 3.10–3.13.
+
+### Status
+- **Phase 1 MERGED** (PR #9, squash) into `main` at `4e9b617`
+  (2026-07-18). All Round 1–5 blockers resolved; ruff clean; CI green
+  3.10–3.13. Next: Phase 2 `feat/compact-snapshot`.

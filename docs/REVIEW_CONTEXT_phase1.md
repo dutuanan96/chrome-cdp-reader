@@ -1,9 +1,8 @@
 # REVIEW CONTEXT — Gate 0 + Phase 1 (chrome-cdp-reader)
 
 **Generated:** 2026-07-18 by Hermes (CDP agent)
-**Updated:** 2026-07-18 (Round 5 — failure-path fixes finalised: shared
-Deadline in create_tab, method-aware cdp_send timeout + send failure, protocol-
-aware lifecycle fallback via UnsupportedMethodError(-32601), metadata synced)
+**Updated:** 2026-07-18 (Round 5 — MERGED squash at 4e9b617; all blockers
+resolved, metadata synced, docs/handover updated for Phase 2)
 **For:** Codex / Antigravity / ChatGPT review of PR #9
 **Repo:** https://github.com/dutuanan96/chrome-cdp-reader
 
@@ -61,11 +60,9 @@ reviewer must check are preserved:
 ### Current SHAs
 - PR #8 base/merge: `e09443b` (baseline) → merge `d8d64733…`
 - PR #9 base: `d8d64733…` (post #8)
-- PR #9 head (Round 5): `2f33029250478228132d9a467a50486b26b761ec` — produced after
-  finalising the 3 Round-5 failure-path blockers (create_tab shared Deadline,
-  method-aware cdp_send timeout + send failure, protocol-aware lifecycle
-  fallback via UnsupportedMethodError(-32601)) plus deterministic regression
-  tests, with all metadata synced.
+- PR #9 head (Round 5): `4e9b61792ade5fdb2839931fd35d0e4fc2a96c29` — **MERGED
+  (squash)** into main. All Round 1–5 blockers resolved; 148 non-live tests
+  pass, ruff clean, CI green 3.10–3.13. Final squash commit on main.
 
 ### Round 3 (all 6 blockers fixed)
 1. **B1 CLI bounded read end-to-end** — `cli.read` forwards `max_chars` to
@@ -357,6 +354,6 @@ crc read javascript:alert(1)   # expect rejected, exit 2
 
 ## 8. Pending human actions
 
-- [ ] Anh (An An) or another AI reviews PR #9 (Round 5 / final approval)
-- [ ] Merge only after review (do NOT self-merge per plan rule 16.5)
+- [x] Anh (An An) or another AI reviewed PR #9 (Round 5 / final approval)
+- [x] **MERGED** (squash) at `4e9b617` — Phase 1 complete
 - [ ] After merge → Phase 2 branch `feat/compact-snapshot`
