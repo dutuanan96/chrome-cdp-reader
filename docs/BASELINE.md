@@ -45,6 +45,9 @@ File: `src/chrome_cdp_reader/bridge.py`
 - Unicode (Vietnamese/Chinese/emoji) handled by JSON over CDP.
 - Every direct WebSocket connection goes through
   `bridge._connect(suppress_origin=True)`.
+- **STATUS AT GATE 0: primitive only.** `read_text` existed but
+  `ChromeReader.read()` did NOT call it; it fetched full `innerText` instead.
+  The end-to-end bounded path was wired in Phase 1 (PR #9), not at Gate 0.
 
 ## Python versions tested
 
@@ -86,8 +89,17 @@ Run: `python3 -m pytest tests/ -q`
   within 3.0s.` — owned tab cleanup is best-effort; content is returned
   correctly regardless. Target Phase 1 (TargetHandle ownership / tighter
   cleanup deadline).
-- Cookie copy from default profile still exists (`cookie_manager.py`);
-  Phase 3 replaces it with a non-credential-copying `profile_manager.py`.
+- **Cookie handling is NOT a copy.** `CookieManager` only creates an empty,
+  dedicated debug profile and lets the user log in ONCE; cookies then persist
+  inside that profile. It does NOT read or copy cookies / Login Data / Web Data
+  from the user's default Chrome profile. The class keeps the legacy name
+  `CookieManager`; a later phase will rename it to `ChromeProfileManager`.
+- **B3 — primitive present, public path incomplete (at Gate 0).** The helper
+  `bridge.read_text(max_chars)` truncates text INSIDE the browser. However, at
+  the time of this baseline, `ChromeReader.read()` still fetched the full
+  `document.body.innerText` in one evaluate and only truncated in Python/CLI.
+  So the bounded end-to-end path (JS-side cut on every `read()`) was wired in
+  Phase 1, not at Gate 0. See PR #9.
 - No compact structured snapshot schema yet (Phase 2).
 - No read-only policy engine yet (Phase 3).
 - No GitHub typed extractor yet (Phase 4).
