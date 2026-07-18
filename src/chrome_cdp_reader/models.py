@@ -16,11 +16,16 @@ class TargetHandle:
 
     ``owned`` is True only for tabs the reader created during an operation.
     Reused user tabs have ``owned=False`` and must NEVER be closed by cleanup.
+
+    Default is ``False`` on purpose: a forgotten ``owned=False`` when reusing a
+    tab is safe (we just don't close it), whereas a forgotten ``owned=True``
+    could close a tab the user had open. Code that creates a tab MUST pass
+    ``owned=True`` explicitly.
     """
 
     target_id: str
     websocket_url: str = ""
-    owned: bool = True
+    owned: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.target_id, str) or not self.target_id:
