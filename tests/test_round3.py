@@ -19,6 +19,7 @@ Covers:
 """
 
 import json
+import time
 from collections import deque
 from unittest.mock import Mock
 
@@ -340,7 +341,7 @@ def test_validate_scheme_allowlist():
 # ===========================================================================
 def _screenshot_reader():
     reader = ChromeReader()
-    reader._prepare_tab = Mock(return_value=_ws(TargetHandle("T1", True)))
+    reader._prepare_tab = Mock(return_value=_ws(TargetHandle("T1", owned=True)))
     reader._close_tab = Mock()
     reader.cdp_send = Mock(return_value={"data": "iVBORw0KGgo="})
     return reader
@@ -556,4 +557,156 @@ def test_close_tab_rejects_wrong_handle_type():
     ws = Mock()
     ws._handle = {"target_id": "T1", "owned": True}
     assert reader._close_tab(ws) is False
+
+
+# ===========================================================================
+# Round 5 — failure-path regression (create_tab shared deadline,
+# method-aware timeout, send failure, lifecycle fallback)
+# ===========================================================================
+
+def test_create_tab_shared_deadline_does_not_exceed_budget():
+    """create_tab must spend from ONE shared budget across _get_json /
+    _connect / cdp_send. When an early step consumes most of the budget, the
+    later step must receive only the real remaining time, so the TOTAL never
+    exceeds `timeout`."""
+    reader = ChromeReader()
+    reader._get_json = Mock(
+        side_effect=lambda ep, *a, **k: time.sleep(0.4) or
+        {"Browser": "C/150", "webSocketDebuggerUrl": "ws://b"})
+    seen = {}
+    def fake_connect(u, timeout=15):
+        seen["connect_timeout"] = timeout
+        time.sleep(timeout)  # would blow the budget if given the full value
+        return _ws(None)
+    reader._connect = Mock(side_effect=fake_connect)
+    reader.cdp_send = Mock(return_value={"targetId": "T1"})
+
+    start = time.monotonic()
+    # With a shared budget, all steps fit within `timeout` (early step consumes
+    # 0.4s, the connect step receives only the ~0.1s remaining) -> no raise.
+    result = reader.create_tab("about:blank", timeout=0.5)
+    elapsed = time.monotonic() - start
+    assert result == "T1"
+    # Total must not approach 0.5 (get_json) + 0.5 (connect) = 1.0.
+    # With a shared budget, connect receives ~0.1s, so total ~0.5.
+    assert elapsed < 0.8, f"create_tab exceeded shared budget: {elapsed:.2f}s"
+    # The connect step received only the remaining slice, not the full 0.5.
+    assert seen["connect_timeout"] < 0.5
+
+
+def _timeout_ws():
+    """WebSocket whose recv always times out (drives the cdp_send timeout path)."""
+    class _T:
+        def __init__(self):
+            self.sent = []
+        def send(self, payload):
+            self.sent.append(json.loads(payload))
+        def settimeout(self, t):
+            pass
+        def recv(self):
+            raise websocket.WebSocketTimeoutException()
+        def close(self):
+            pass
+    return _T()
+
+
+def test_cdp_send_runtime_evaluate_timeout_is_evaluation_error():
+    reader = ChromeReader()
+    with pytest.raises(EvaluationError):
+        reader.cdp_send(_timeout_ws(), "Runtime.evaluate", {}, timeout=0.2)
+
+
+def test_cdp_send_page_navigate_timeout_is_navigation_timeout():
+    reader = ChromeReader()
+    with pytest.raises(NavigationTimeoutError):
+        reader.cdp_send(_timeout_ws(), "Page.navigate", {"url": "x"}, timeout=0.2)
+
+
+def test_cdp_send_create_target_timeout_is_target_error():
+    reader = ChromeReader()
+    with pytest.raises(TargetError):
+        reader.cdp_send(_timeout_ws(), "Target.createTarget", {"url": "x"},
+                        timeout=0.2)
+
+
+def test_cdp_send_close_target_timeout_is_target_error():
+    reader = ChromeReader()
+    with pytest.raises(TargetError):
+        reader.cdp_send(_timeout_ws(), "Target.closeTarget", {"targetId": "x"},
+                        timeout=0.2)
+
+
+def test_cdp_send_page_close_timeout_is_target_error():
+    reader = ChromeReader()
+    with pytest.raises(TargetError):
+        reader.cdp_send(_timeout_ws(), "Page.close", {}, timeout=0.2)
+
+
+def test_cdp_send_send_failure_is_connection_error():
+    class _BadSend:
+        def send(self, payload):
+            raise websocket.WebSocketException("boom")
+        def settimeout(self, t):
+            pass
+        def recv(self):
+            raise websocket.WebSocketTimeoutException()
+        def close(self):
+            pass
+    reader = ChromeReader()
+    with pytest.raises(ConnectionError):
+        reader.cdp_send(_BadSend(), "Runtime.evaluate", {}, timeout=0.2)
+
+
+def _reader_for_lifecycle(raise_method, exc):
+    """A reader whose _prepare_tab runs for real, but Page/Runtime/lifecycle
+    cdp_send calls are scripted. `raise_method` is the method that should raise
+    `exc` (only when enabling lifecycle); everything else returns {}."""
+    reader = _reader_min()
+    reader.create_tab = Mock(return_value="T1")
+    reader._get_tab_ws = Mock(return_value="ws://t")
+    reader._connect = Mock(return_value=_ws(None))
+    reader.cdp_send = Mock(
+        side_effect=lambda ws, method, params=None, timeout=10: (
+            {} if method != raise_method
+            else (_ for _ in ()).throw(exc)))
+    reader.cdp_js = Mock(return_value='"complete"')
+    reader._wait_navigation_ready = Mock(return_value=True)
+    reader._wait_ready_state = Mock(return_value=True)
+    reader._get_event_queue = Mock(side_effect=lambda ws: deque())
+    return reader
+
+
+def test_lifecycle_fallback_on_unsupported_protocol():
+    """A protocol-confirmed 'not supported' error falls back to legacy
+    loadEventFired (lifecycle_enabled stays False)."""
+    reader = _reader_for_lifecycle(
+        "Page.setLifecycleEventsEnabled",
+        EvaluationError("Command Page.setLifecycleEventsEnabled is not supported"))
+    # Should NOT raise — unsupported lifecycle is a benign fallback.
+    ws = reader._prepare_tab("https://example.com", timeout=5)
+    assert ws is not None
+
+
+def test_lifecycle_propagation_on_socket_failure():
+    """A ConnectionError while enabling lifecycle must propagate (not be
+    swallowed into a legacy fallback)."""
+    reader = _reader_for_lifecycle(
+        "Page.setLifecycleEventsEnabled", ConnectionError("socket down"))
+    with pytest.raises(ConnectionError):
+        reader._prepare_tab("https://example.com", timeout=5)
+
+
+def test_lifecycle_propagation_on_timeout():
+    reader = _reader_for_lifecycle(
+        "Page.setLifecycleEventsEnabled", NavigationTimeoutError("timed out"))
+    with pytest.raises(NavigationTimeoutError):
+        reader._prepare_tab("https://example.com", timeout=5)
+
+
+def test_lifecycle_propagation_on_malformed_response():
+    reader = _reader_for_lifecycle(
+        "Page.setLifecycleEventsEnabled", ExtractionError("bad json"))
+    with pytest.raises(ExtractionError):
+        reader._prepare_tab("https://example.com", timeout=5)
+
 

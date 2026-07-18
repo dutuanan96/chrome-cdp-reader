@@ -31,6 +31,7 @@ from chrome_cdp_reader.errors import (
 )
 
 from chrome_cdp_reader.models import TargetHandle
+from chrome_cdp_reader.deadlines import Deadline
 
 logger = logging.getLogger("chrome_cdp_reader")
 if os.environ.get("CRC_DEBUG"):
@@ -143,17 +144,28 @@ class ChromeReader:
         which broke when Chrome sent events between send/recv. Events
         (messages without a matching id) are buffered in the per-connection
         event queue instead of being discarded.
+
+        Error taxonomy (method-aware, B2/R5):
+          - ws.send / socket failure        -> ConnectionError
+          - malformed (non-JSON) response    -> ExtractionError
+          - Runtime.evaluate error/timeout   -> EvaluationError
+          - Page.navigate error/timeout      -> NavigationError / NavigationTimeoutError
+          - Target.* / Page.close error/timeout -> TargetError
+          - any other method error/timeout   -> EvaluationError (generic)
         """
         if not hasattr(ws, '_cdp_msg_id'):
             ws._cdp_msg_id = 0
         ws._cdp_msg_id += 1
         msg_id = ws._cdp_msg_id
 
-        ws.send(json.dumps({
-            "id": msg_id,
-            "method": method,
-            "params": params or {}
-        }))
+        try:
+            ws.send(json.dumps({
+                "id": msg_id,
+                "method": method,
+                "params": params or {}
+            }))
+        except websocket.WebSocketException as exc:
+            raise ConnectionError(f"CDP send failed on {method}: {exc}") from exc
         logger.debug("CDP send id=%s method=%s", msg_id, method)
 
         deadline = time.monotonic() + timeout
@@ -174,13 +186,14 @@ class ChromeReader:
                 if "error" in msg:
                     err = msg["error"]
                     text = err.get("message", err)
-                    # Method-aware error taxonomy (B2/R4).
+                    # Method-aware error taxonomy (B2/R5).
                     if method == "Runtime.evaluate":
                         raise EvaluationError(f"CDP error on {method}: {text}")
                     if method == "Page.navigate":
                         raise NavigationError(f"CDP error on {method}: {text}")
                     if method in ("Target.createTarget", "Target.attachToTarget",
-                                  "Target.closeTarget", "Target.attachToBrowserTarget"):
+                                  "Target.closeTarget", "Target.attachToBrowserTarget",
+                                  "Page.close"):
                         raise TargetError(f"CDP error on {method}: {text}")
                     # Fallback for any other method.
                     raise EvaluationError(f"CDP error on {method}: {text}")
@@ -189,8 +202,15 @@ class ChromeReader:
             if msg.get("method"):
                 self._get_event_queue(ws).append(msg)
 
-        raise NavigationTimeoutError(
-            f"CDP method {method} timed out after {timeout}s")
+        # Timed out waiting for the response.
+        if method == "Runtime.evaluate":
+            raise EvaluationError(f"CDP method {method} timed out after {timeout}s")
+        if method == "Page.navigate":
+            raise NavigationTimeoutError(f"CDP method {method} timed out after {timeout}s")
+        if method in ("Target.createTarget", "Target.attachToTarget",
+                      "Target.closeTarget", "Target.attachToBrowserTarget", "Page.close"):
+            raise TargetError(f"CDP method {method} timed out after {timeout}s")
+        raise EvaluationError(f"CDP method {method} timed out after {timeout}s")
 
     def cdp_js(self, ws: websocket.WebSocket, expression: str,
                timeout: float = 10) -> Any:
@@ -272,18 +292,22 @@ class ChromeReader:
         from chrome_cdp_reader.url_validation import validate_scheme
         validate_scheme(url)
 
-        version = self._get_json("/json/version", timeout=min(timeout, 5.0))
+        # R5: a single shared Deadline for the whole create_tab operation.
+        # Each step consumes from the same remaining budget, so the total
+        # time cannot exceed `timeout` even when steps run sequentially.
+        budget = Deadline(timeout)
+        version = self._get_json("/json/version", timeout=budget.bounded(5.0))
         browser_ws = version.get("webSocketDebuggerUrl", "")
 
         if not browser_ws:
             raise ConnectionError("Cannot get WebSocket URL from Chrome")
 
-        ws = self._connect(browser_ws, timeout=min(timeout, 5.0))
+        ws = self._connect(browser_ws, timeout=budget.bounded(5.0))
         try:
             try:
                 result = self.cdp_send(
                     ws, "Target.createTarget", {"url": url},
-                    timeout=min(timeout, 20.0))
+                    timeout=budget.bounded(20.0))
             except EvaluationError as exc:
                 raise TargetError(f"Failed to create tab: {exc}") from exc
         finally:
@@ -499,8 +523,18 @@ class ChromeReader:
                 self.cdp_send(ws, "Page.setLifecycleEventsEnabled",
                               {"enabled": True}, timeout=min(5, remaining()))
                 lifecycle_enabled = True
-            except Exception:
-                lifecycle_enabled = False
+            except ChromeCDPReaderError as exc:
+                # Only fall back to the legacy loadEventFired path when the
+                # protocol itself reports the command is unsupported. Any
+                # other failure (socket error, timeout, malformed response,
+                # connection drop) MUST propagate — swallowing it would hide
+                # a real reliability problem (R5/B3).
+                msg = str(exc).lower()
+                if "not supported" in msg or "unknown method" in msg \
+                        or "command is not" in msg:
+                    lifecycle_enabled = False
+                else:
+                    raise
 
             # 3. Navigate exactly once (no reload)
             if navigate:
