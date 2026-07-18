@@ -60,8 +60,8 @@ reviewer must check are preserved:
 ### Current SHAs
 - PR #8 base/merge: `e09443b` (baseline) → merge `d8d64733…`
 - PR #9 base: `d8d64733…` (post #8)
-- PR #9 head (Round 4): `<SET AFTER COMMIT>` — produced after fixing all 7
-  Round-3/4 blockers (deadline E2E budgeting of every helper, method-aware CDP
+- PR #9 head (Round 4): `f69e63961b1b898fae9f1d34cd3c1dd9ed4fd992` — produced after
+  fixing all 7 Round-3/4 blockers (deadline E2E budgeting of every helper, method-aware CDP
   error taxonomy, strict lifecycle edge cases, about:blank-only scheme,
   screenshot no-replace + backward-compat str return, TargetHandle immutability
   in open_tab cleanup).
