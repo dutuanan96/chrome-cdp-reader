@@ -42,6 +42,8 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
     - "facebook" - Read Facebook
     """
     from chrome_cdp_reader.bridge import ChromeReader
+    from chrome_cdp_reader.errors import ConnectionError, exit_code_for
+    from chrome_cdp_reader.url_validation import validate_scheme
 
     reader = ChromeReader()
 
@@ -50,12 +52,17 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
         click.echo("Error: Cannot connect to Chrome.", err=True)
         click.echo("Make sure Chrome is running with --remote-debugging-port=9222", err=True)
         click.echo("Run: crc setup", err=True)
-        sys.exit(1)
+        sys.exit(exit_code_for(ConnectionError("not connected")))
 
     if not as_json:
         click.echo(f"Reading {target}...", err=True)
 
     try:
+        # Phase 1: validate target URL scheme BEFORE any navigation.
+        # Site aliases (gmail/zalo/facebook) bypass scheme validation.
+        if target.lower() not in ("gmail", "zalo", "facebook"):
+            validate_scheme(target)
+
         if target.lower() == "gmail":
             result = reader.read_gmail(search=search, wait=wait)
         elif target.lower() == "zalo":
@@ -86,7 +93,12 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        from chrome_cdp_reader.errors import (
+            ChromeCDPReaderError,
+            exit_code_for,
+        )
+        code = exit_code_for(e) if isinstance(e, ChromeCDPReaderError) else 1
+        sys.exit(code)
 
 
 @cli.command()
