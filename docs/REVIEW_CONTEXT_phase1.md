@@ -1,9 +1,32 @@
 # REVIEW CONTEXT — Gate 0 + Phase 1 (chrome-cdp-reader)
 
 **Generated:** 2026-07-18 by Hermes (CDP agent)
+**Updated:** 2026-07-18 (post human+AI review — all blockers fixed)
 **For:** Codex / Antigravity / ChatGPT review of PR #8 and PR #9
 **Repo:** https://github.com/dutuanan96/chrome-cdp-reader
 **Master plan:** `/mnt/c/Users/HP/Downloads/chrome-cdp-reader_master_standout_plan_vi.md` (2286 lines, Vietnamese)
+
+---
+
+## 0b. REVIEW OUTCOME (round 1 → fixed)
+
+The human reviewer (An An) and an independent AI review raised 7 blockers on
+PR #8 + #9. ALL are now resolved and pushed:
+
+| # | Blocker | Fix | Where |
+|---|---|---|---|
+| 1 | CI red (live tests ran on CI without Chrome) | `_chrome_up()` returns `ChromeReader(CDP).is_connected()`; live tests marked `@pytest.mark.live`; marker registered; CI runs `pytest -q -m "not live"` | `pyproject.toml`, `ci.yml`, `test_integration.py`, `test_tab_reuse_live.py` |
+| 2 | BASELINE.md falsely claimed cookie copy | Rewritten: `CookieManager` does NOT copy; clarifies legacy-name-only | `docs/BASELINE.md` (PR #8) |
+| 3 | B3 primitive only, public `read()` fetched full innerText | `read()` now calls `read_text(max_chars)`; returns textLength+truncated; CLI `--json --max-chars` bounded | `bridge.py`, `cli.py`, `test_bridge_integration.py` |
+| 4 | URL validation only in one CLI command | Moved to core boundary (`_prepare_tab`/`read`/`screenshot`/`open_tab`) | `bridge.py` |
+| 5 | Two divergent exception systems | `errors.py` is single source; bridge raises typed errors; `CDPError` alias; unknown→exit 70 | `errors.py`, `bridge.py`, `cli.py` |
+| 6 | TargetHandle default `owned=True` (dangerous) | Default `owned=False`; caller must pass `owned=True` | `models.py` |
+| 7 | Screenshot hardening missing | Only .png/.jpg/.jpeg; quality 1-100; .bmp rejected; overwrite guard; dir creation; returns metadata | `bridge.py`, `cli.py` |
+
+Deadline (blocker noted as "scaffold only") is now integrated into `_prepare_tab`.
+
+**Status to re-check on next review: diff, not report.** CI must be green on
+Python 3.10-3.13 (non-live). Live tests run via manual command / separate job.
 
 ---
 
