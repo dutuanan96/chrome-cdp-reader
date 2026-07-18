@@ -15,14 +15,13 @@ GMAIL_PREFIX = "https://mail.google.com/mail/"
 
 
 def _chrome_up() -> bool:
-    try:
-        ChromeReader().is_connected()
-        return True
-    except Exception:
-        return False
+    # Correct probe: is_connected() returns False (not raise) when Chrome is
+    # unreachable, so return its value directly — never swallow it as True.
+    return ChromeReader(CDP).is_connected()
 
 
-live = pytest.mark.skipif(not _chrome_up(), reason="Chrome debug not reachable")
+live = pytest.mark.live
+pytestmark = pytest.mark.skipif(not _chrome_up(), reason="Chrome debug not reachable")
 
 
 def _gmail_tab_count(reader: ChromeReader) -> int:

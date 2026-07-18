@@ -1,23 +1,25 @@
 """
+
 Error taxonomy for chrome-cdp-reader (Phase 1).
 
 Design notes
 ------------
-* ``CDPError`` already exists in ``bridge.py`` and is used widely. To stay
-  backward compatible we make the new public base ``ChromeCDPReaderError`` a
-  subclass of ``CDPError`` so every existing ``except CDPError`` still works.
-* Every concrete error maps to a stable CLI exit code (see ``EXIT_CODES``).
-* We intentionally do NOT export cookies or passwords, so no credential-related
-  error types are needed beyond a generic unsafe-process refusal.
+* ``ChromeCDPReaderError`` is the single public base for all reader errors.
+  The legacy ``CDPError`` name (historically defined in ``bridge.py``) is kept
+  as an alias so existing ``from chrome_cdp_reader.bridge import CDPError`` and
+  ``except CDPError`` keep working. We define the base HERE (not in bridge) to
+  avoid a circular import: bridge imports from this module.
 """
 
 from __future__ import annotations
 
-from .bridge import CDPError  # existing base, keep compatible
 
-
-class ChromeCDPReaderError(CDPError):
+class ChromeCDPReaderError(Exception):
     """Public base exception for all reader errors."""
+
+
+# Backward-compatible alias for the old ``bridge.CDPError``.
+CDPError = ChromeCDPReaderError
 
 
 class ConnectionError(ChromeCDPReaderError):

@@ -103,31 +103,42 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
 
 @cli.command()
 @click.argument("url")
-@click.option("--output", "-o", default="screenshot.png", help="Output file path")
+@click.option("--output", "-o", default="screenshot.png", help="Output file path (.png/.jpg/.jpeg)")
 @click.option(
     "--wait", "-w", type=click.IntRange(min=1), default=15, show_default=True,
     help="Maximum seconds to wait for page readiness",
 )
-def screenshot(url: str, output: str, wait: int):
+@click.option("--quality", "-q", type=click.IntRange(min=1, max=100), default=80,
+              show_default=True, help="JPEG quality (1-100)")
+@click.option("--overwrite", is_flag=True, help="Allow overwriting an existing output file")
+def screenshot(url: str, output: str, wait: int, quality: int, overwrite: bool):
     """
     Take a screenshot of a URL.
     """
     from chrome_cdp_reader.bridge import ChromeReader
+    from chrome_cdp_reader.errors import (
+        ChromeCDPReaderError,
+        ConnectionError,
+        exit_code_for,
+    )
 
     reader = ChromeReader()
 
     if not reader.is_connected():
         click.echo("Error: Cannot connect to Chrome.", err=True)
-        sys.exit(1)
+        sys.exit(exit_code_for(ConnectionError("not connected")))
 
     click.echo(f"Taking screenshot of {url}...")
 
     try:
-        result = reader.screenshot(url, output=output, wait=wait)
-        click.echo(f"Screenshot saved to: {result}")
+        result = reader.screenshot(url, output=output, wait=wait,
+                                   quality=quality, overwrite=overwrite)
+        click.echo(f"Screenshot saved to: {result['path']}")
+        click.echo(f"  format={result['format']} bytes={result['byteSize']}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        code = exit_code_for(e) if isinstance(e, ChromeCDPReaderError) else 1
+        sys.exit(code)
 
 
 @cli.command()
