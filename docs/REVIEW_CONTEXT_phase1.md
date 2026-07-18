@@ -1,7 +1,8 @@
 # REVIEW CONTEXT — Gate 0 + Phase 1 (chrome-cdp-reader)
 
 **Generated:** 2026-07-18 by Hermes (CDP agent)
-**Updated:** 2026-07-18 (Round 2 — rebase onto merged #8, exit-code blocker fixed)
+**Updated:** 2026-07-18 (Round 4 — deadline E2E, method-aware errors, strict
+lifecycle edge cases, about:blank-only, screenshot no-replace + backward compat)
 **For:** Codex / Antigravity / ChatGPT review of PR #9
 **Repo:** https://github.com/dutuanan96/chrome-cdp-reader
 
@@ -59,10 +60,11 @@ reviewer must check are preserved:
 ### Current SHAs
 - PR #8 base/merge: `e09443b` (baseline) → merge `d8d64733…`
 - PR #9 base: `d8d64733…` (post #8)
-- PR #9 head (Round 3): `ea2edc5ed5d95ae6d62ee5eca28026b2a302014d` — produced after
-  fixing all 6 Round-2 blockers (CLI bounded read end-to-end, TargetHandle
-  runtime, error taxonomy runtime wiring, create_tab URL validation,
-  Deadline+strict correlation, screenshot hardening) plus package facade export.
+- PR #9 head (Round 4): `<SET AFTER COMMIT>` — produced after fixing all 7
+  Round-3/4 blockers (deadline E2E budgeting of every helper, method-aware CDP
+  error taxonomy, strict lifecycle edge cases, about:blank-only scheme,
+  screenshot no-replace + backward-compat str return, TargetHandle immutability
+  in open_tab cleanup).
 
 ### Round 3 (all 6 blockers fixed)
 1. **B1 CLI bounded read end-to-end** — `cli.read` forwards `max_chars` to
@@ -94,14 +96,57 @@ reviewer must check are preserved:
 6. **B6 screenshot hardening** — output confined to the CWD-based screenshot
    root (path-escape rejected); `quality` must be a real `int` (bool/str/float
    →`InvalidInputError`); extension allowlist (`.bmp` rejected); TOCTOU-safe
-   atomic write (`O_EXCL` temp + `os.replace`); `return_path=True` keeps the old
-   `str` return for backward compat. `test_round3` covers each.
+   atomic write (`O_EXCL` temp + `os.replace`); `return_metadata=True` returns
+   the dict, the default remains `str` (backward compatible). `test_round3` covers each.
+
+### Round 4 (7 blockers fixed)
+1. **Deadline truly end-to-end.** Every helper called inside `_prepare_tab`
+   now receives the remaining budget (`min(..., remaining())`), not a default
+   large timeout: `get_tabs`, `_find_reusable_tab`, `create_tab`,
+   `_get_tab_ws`, `_connect`, and the selector DOM-fallback `cdp_js`. The
+   `Deadline` starts before any tab lookup/create/connect. `test_round3`
+   proves `timeout=1` makes `create_tab`/`_get_tab_ws`/`_connect` run with a
+   budget `<= 1.0`, not the historical 5/15s defaults.
+2. **Method-aware error taxonomy.** `cdp_send` no longer maps every CDP error
+   to `EvaluationError`. Real malformed/error responses drive the mapping:
+   `Runtime.evaluate`→`EvaluationError`, `Page.navigate`→`NavigationError`,
+   `Target.*`→`TargetError`, malformed JSON→`ExtractionError`, socket
+   failure→`ConnectionError`. Tests inject real CDP responses (not
+   monkeypatched helpers that pre-throw).
+3. **Strict lifecycle edge cases.** When `nav_loader` is set (cross-document),
+   only a `frameId`+`loaderId`-matching lifecycle event completes; a wrong
+   loader event and a `navigatedWithinDocument` event are rejected. When
+   `nav_loader` is empty (same-document), only a `frameId`-matching
+   `navigatedWithinDocument` event completes; a lifecycle event is rejected.
+   `test_round3` covers wrong-loader / same-doc-in-cross-doc /
+   lifecycle-in-same-doc.
+4. **Screenshot no-replace + backward compat.** `overwrite=False` (default)
+   creates the destination with `O_EXCL` directly (an existing file raises
+   `FileExistsError`→`InvalidInputError`, no check-then-create TOCTOU window).
+   `overwrite=True` uses a temp file + atomic `os.replace`. The root is a
+   dedicated `screenshot_root` (defaults to CWD) resolved via realpath +
+   `Path.relative_to` so symlink/junction escapes are blocked. Default return
+   type stays `str` (original API); `return_metadata=True` returns the dict.
+   The CLI uses `return_metadata=True`. CHANGELOG updated accordingly.
+5. **URL scheme exactness.** Only exactly `about:blank` is allowed — the whole
+   `about:` scheme is no longer permitted, so `about:settings`/`about:version`
+   are rejected. `test_round3` asserts rejection.
+6. **TargetHandle immutability in cleanup.** `open_tab` captures the handle and
+   passes it explicitly to `_close_tab(ws, handle=handle)`. `_close_tab` types
+   its handle as `TargetHandle` and rejects non-`TargetHandle` metadata. A test
+   mutates `ws._handle` after capture yet cleanup still uses the original
+   captured handle.
+7. **Docs updated last.** PR #9 head SHA, Round 3/Round 4 labels, 132 passed /
+   4 skipped / 2 deselected, CHANGELOG (deadline, TOCTOU, backward compat), and
+   the PR description (still the Round-2 draft) are refreshed.
 
 ### CI status
-- `pytest -q -m "not live"` green on Python 3.10 / 3.11 / 3.12 / 3.13.
+- `pytest -q -m "not live"` → **132 passed, 4 live skipped, 2 deselected** on
+  Python 3.10 / 3.11 / 3.12 / 3.13.
 - Ruff clean (`ruff check src/ tests/`).
 - Live tests (`@pytest.mark.live`) are excluded from the default matrix and run
-  only against a real Chrome debug instance.
+  only against a real Chrome debug instance (deferred until static review
+  passes).
 
 ---
 
@@ -127,7 +172,7 @@ without changing runtime behaviour for valid inputs.
 |---|---|---|
 | `src/chrome_cdp_reader/errors.py` | Typed exception taxonomy + stable CLI exit codes | `ChromeCDPReaderError` (= legacy `CDPError` alias), `ConnectionError`, `PortConflictError`, `UnsafeProcessError`, `NavigationError`, `NavigationTimeoutError`, `DownloadNavigationError`, `TargetError`, `EvaluationError`, `PolicyDeniedError`, `InvalidInputError`, `ExtractionError`; `EXIT_CODES` + `exit_code_for()` (fallback 70) |
 | `src/chrome_cdp_reader/deadlines.py` | Single monotonic navigation budget | `Deadline(timeout)` → `.remaining()`, `.expired()`, `.bounded(max)`; rejects bool/str/zero/negative/NaN/Inf |
-| `src/chrome_cdp_reader/url_validation.py` | Scheme allow/block + credential check | `validate_scheme(url)` → scheme or raises `InvalidInputError`; `ALLOWED_SCHEMES={http,https,about}`, `BLOCKED_SCHEMES={file,chrome,chrome-extension,devtools,javascript,data}` |
+| `src/chrome_cdp_reader/url_validation.py` | Scheme allow/block + credential check | `validate_scheme(url)` → scheme or raises `InvalidInputError`; `ALLOWED_SCHEMES={http,https}`, `ALLOWED_ABOUT={about:blank}`, `BLOCKED_SCHEMES={file,chrome,chrome-extension,devtools,javascript,data}` |
 | `src/chrome_cdp_reader/models.py` | Explicit tab ownership | `TargetHandle(target_id, websocket_url="", owned=False)` — **default `owned=False`** (reused); `_prepare_tab` sets `owned=True` for created tabs |
 
 ### 3.2 Integration into the core (NOT scaffold-only — wired in)
@@ -155,8 +200,8 @@ without changing runtime behaviour for valid inputs.
   `.png`/`.jpg`/`.jpeg`; rejects others (e.g. `.bmp` → `InvalidInputError`, no
   fake JPEG under a wrong extension); validates `quality` 1–100; refuses to
   overwrite an existing file unless `overwrite=True`; creates parent
-  directories; returns `{path, format, byteSize}` metadata. CLI prints the
-  metadata.
+  directories; returns a `str` path by default and a `{path, format, byteSize}`
+  dict when `return_metadata=True`. CLI prints the metadata.
 
 ### 3.3 CLI integration (`cli.py`)
 

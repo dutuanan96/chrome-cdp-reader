@@ -23,11 +23,14 @@ from chrome_cdp_reader.errors import (
     ConnectionError,
     DownloadNavigationError,
     EvaluationError,
+    ExtractionError,
     InvalidInputError,
     NavigationError,
     NavigationTimeoutError,
     TargetError,
 )
+
+from chrome_cdp_reader.models import TargetHandle
 
 logger = logging.getLogger("chrome_cdp_reader")
 if os.environ.get("CRC_DEBUG"):
@@ -61,6 +64,9 @@ class ChromeReader:
         self._browser_ws_url = None
         self._tabs = []
         self._owned_target_ids = set()  # targets we created, for stale cleanup
+        # Confined root for screenshot output. Defaults to CWD but is resolved
+        # to a realpath so symlink/junction escapes are blocked (B4/R4).
+        self.screenshot_root: Optional[str] = None
 
     def _get_json(self, endpoint: str, *, timeout: float = 5.0) -> Dict[str, Any]:
         """Fetch JSON from CDP HTTP endpoint."""
@@ -89,9 +95,9 @@ class ChromeReader:
         """Get Chrome version info."""
         return self._get_json("/json/version")
 
-    def get_tabs(self) -> List[Dict[str, Any]]:
+    def get_tabs(self, *, timeout: float = 5.0) -> List[Dict[str, Any]]:
         """Get list of open tabs."""
-        return self._get_json("/json/list")
+        return self._get_json("/json/list", timeout=timeout)
 
     def find_tab(self, url_fragment: str) -> Optional[Dict[str, Any]]:
         """Find a tab by URL fragment."""
@@ -159,13 +165,25 @@ class ChromeReader:
                 continue
             except websocket.WebSocketException as exc:
                 raise ConnectionError(f"CDP socket error on {method}: {exc}") from exc
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise ExtractionError(
+                    f"malformed CDP response on {method}: {exc}") from exc
             if msg.get("id") == msg_id:
                 if "error" in msg:
                     err = msg["error"]
-                    raise EvaluationError(
-                        f"CDP error on {method}: {err.get('message', err)}"
-                    )
+                    text = err.get("message", err)
+                    # Method-aware error taxonomy (B2/R4).
+                    if method == "Runtime.evaluate":
+                        raise EvaluationError(f"CDP error on {method}: {text}")
+                    if method == "Page.navigate":
+                        raise NavigationError(f"CDP error on {method}: {text}")
+                    if method in ("Target.createTarget", "Target.attachToTarget",
+                                  "Target.closeTarget", "Target.attachToBrowserTarget"):
+                        raise TargetError(f"CDP error on {method}: {text}")
+                    # Fallback for any other method.
+                    raise EvaluationError(f"CDP error on {method}: {text}")
                 return msg.get("result", {})
             # No matching id → it's an event; buffer it for waiters.
             if msg.get("method"):
@@ -236,13 +254,15 @@ class ChromeReader:
                 }
         return raw
 
-    def create_tab(self, url: str = "about:blank") -> str:
+    def create_tab(self, url: str = "about:blank", *, timeout: float = 15) -> str:
         """
         Create a new tab. The URL is validated at this boundary so callers
         cannot open dangerous schemes (file/javascript/data/...).
 
         Args:
-            url: Initial URL. Must be http/https/about (validated).
+            url: Initial URL. Must be http/https/about:blank (validated).
+            timeout: Per-step budget (connect + createTarget). Bounded by the
+                caller's overall Deadline via remaining().
 
         Returns:
             Target ID of the new tab
@@ -252,16 +272,18 @@ class ChromeReader:
         from chrome_cdp_reader.url_validation import validate_scheme
         validate_scheme(url)
 
-        version = self._get_json("/json/version")
+        version = self._get_json("/json/version", timeout=min(timeout, 5.0))
         browser_ws = version.get("webSocketDebuggerUrl", "")
 
         if not browser_ws:
             raise ConnectionError("Cannot get WebSocket URL from Chrome")
 
-        ws = self._connect(browser_ws)
+        ws = self._connect(browser_ws, timeout=min(timeout, 5.0))
         try:
             try:
-                result = self.cdp_send(ws, "Target.createTarget", {"url": url})
+                result = self.cdp_send(
+                    ws, "Target.createTarget", {"url": url},
+                    timeout=min(timeout, 20.0))
             except EvaluationError as exc:
                 raise TargetError(f"Failed to create tab: {exc}") from exc
         finally:
@@ -313,15 +335,20 @@ class ChromeReader:
             params = msg.get("params", {})
             if method == "Page.lifecycleEvent":
                 saw_lifecycle = True
+                # Lifecycle only counts for cross-document (nav_loader set).
+                if not nav_loader:
+                    return False
                 if params.get("frameId") != nav_frame:
                     return False
-                if nav_loader and params.get("loaderId") != nav_loader:
+                if params.get("loaderId") != nav_loader:
                     return False
                 if params.get("name") in ("DOMContentLoaded", "load"):
                     return True
                 return False
             if method == "Page.navigatedWithinDocument":
-                return params.get("frameId") == nav_frame
+                # Same-document (fragment/History) navigation: only valid when
+                # this is a same-document wait (nav_loader empty).
+                return (not nav_loader) and params.get("frameId") == nav_frame
             if method == "Page.loadEventFired":
                 # Strict: only accept as fallback when lifecycle was OFF.
                 return not lifecycle_enabled
@@ -352,7 +379,8 @@ class ChromeReader:
         return False
 
     def _find_reusable_tab(
-        self, url: str, *, url_prefix: Optional[str] = None
+        self, url: str, *, url_prefix: Optional[str] = None,
+        timeout: float = 5.0,
     ) -> Optional[Dict[str, Any]]:
         """Find a reusable page target by exact URL or URL prefix.
 
@@ -360,7 +388,7 @@ class ChromeReader:
         SPA URLs (Gmail changes its `#fragment` constantly) reuse one tab
         instead of spawning a new one on every navigation.
         """
-        for tab in self.get_tabs():
+        for tab in self.get_tabs(timeout=timeout):
             if tab.get("type") != "page":
                 continue
             tab_url = tab.get("url", "")
@@ -424,19 +452,20 @@ class ChromeReader:
         # 1. Tab selection
         created_target = False
         if reuse_existing:
-            tab = self._find_reusable_tab(url, url_prefix=reuse_url_prefix)
+            tab = self._find_reusable_tab(
+                url, url_prefix=reuse_url_prefix, timeout=min(5, remaining()))
             if tab:
                 ws_url = tab.get("webSocketDebuggerUrl", "")
                 tab_id = tab.get("id", "")
                 navigate = tab.get("url", "") != url
             else:
-                tab_id = self.create_tab("about:blank")
-                ws_url = self._get_tab_ws(tab_id)
+                tab_id = self.create_tab("about:blank", timeout=remaining())
+                ws_url = self._get_tab_ws(tab_id, timeout=min(5, remaining()))
                 created_target = True
                 navigate = True
         else:
-            tab_id = self.create_tab("about:blank")
-            ws_url = self._get_tab_ws(tab_id)
+            tab_id = self.create_tab("about:blank", timeout=remaining())
+            ws_url = self._get_tab_ws(tab_id, timeout=min(5, remaining()))
             created_target = True
             navigate = True
 
@@ -518,7 +547,8 @@ class ChromeReader:
                 found = self.wait_for_selector(ws, selector, timeout=remaining())
                 if not found:
                     text_len = self.cdp_js(
-                        ws, "document.body ? document.body.innerText.length : 0"
+                        ws, "document.body ? document.body.innerText.length : 0",
+                        timeout=min(2, remaining()),
                     ) or 0
                     if text_len < 10:
                         raise NavigationTimeoutError(
@@ -648,7 +678,7 @@ class ChromeReader:
 
     def _close_tab(self, ws: websocket.WebSocket, *,
                    timeout: float = 3.0,
-                   handle: Optional[Any] = None) -> bool:
+                   handle: Optional["TargetHandle"] = None) -> bool:
         """Close an OWNED page and verify it disappeared.
 
         Ownership is taken from the explicit ``TargetHandle`` (source of
@@ -656,14 +686,23 @@ class ChromeReader:
         ``ws._handle`` set by ``_prepare_tab``. Reused/user tabs
         (owned=False) are never closed.
 
+        Args:
+            ws: The tab WebSocket (used for Page.close).
+            timeout: Max seconds for the close handshake.
+            handle: Explicit ``TargetHandle``. If the resolved handle is not a
+                ``TargetHandle`` instance, it is rejected (wrong metadata
+                type) rather than silently trusted.
+
         Returns True if the target is gone (or was never owned), False on failure.
         Logs a warning with the target id when closure fails (never silent).
         """
+        from chrome_cdp_reader.models import TargetHandle
         handle = handle or getattr(ws, "_handle", None)
-        if handle is None:
+        if not isinstance(handle, TargetHandle):
             logger.warning(
-                "Cannot close tab: no TargetHandle metadata on WebSocket. "
-                "Use open_tab() instead of manual create_tab/_connect."
+                "Cannot close tab: handle is not a TargetHandle (%r). "
+                "Use open_tab() instead of manual create_tab/_connect.",
+                type(handle).__name__,
             )
             return False
         target_id = handle.target_id
@@ -786,8 +825,11 @@ class ChromeReader:
             yield ws
         finally:
             try:
-                if close_after and owns_target:
-                    self._close_tab(ws, timeout=3.0)
+                if close_after and owns_target and handle is not None:
+                    # Pass the captured handle explicitly so cleanup uses the
+                    # original ownership decision even if ws._handle is later
+                    # mutated in the caller's context.
+                    self._close_tab(ws, timeout=3.0, handle=handle)
             finally:
                 try:
                     ws.close()
@@ -841,7 +883,7 @@ class ChromeReader:
     def screenshot(self, url: str, output: str = "screenshot.jpg",
                    wait: int = 15, quality: int = 80,
                    *, overwrite: bool = False,
-                   return_path: bool = False) -> Any:
+                   return_metadata: bool = False) -> Any:
         """
         Take a screenshot of a URL using the same lifecycle as read().
 
@@ -853,15 +895,21 @@ class ChromeReader:
             wait: Max seconds for page load.
             quality: JPEG quality (1-100), ignored for PNG. Must be a real int;
                      bool/str/float are rejected (InvalidInputError).
-            overwrite: If False (default), refuse to clobber an existing file.
-            return_path: If True, return the output path string (legacy API).
-                         If False (default), return a metadata dict
-                         {path, format, byteSize}.
+            overwrite: If False (default), the destination is created with a
+                    no-replace (O_EXCL) mechanism — an existing file causes
+                    FileExistsError -> InvalidInputError (no TOCTOU check-then-
+                    create race). If True, a temp file + atomic rename is used.
+            return_metadata: If True, return a metadata dict
+                    {path, format, byteSize}. If False (default), return the
+                    output path string — preserving the original pre-Phase-1
+                    API for backward compatibility. The CLI uses
+                    return_metadata=True.
 
         Returns:
-            str (when return_path=True) or dict with path/format/byteSize.
+            str path (default) or dict with path/format/byteSize.
         """
         import os
+        from pathlib import Path
         import os.path as _osp
 
         # --- B6: strict quality validation (real int only) ---
@@ -876,21 +924,24 @@ class ChromeReader:
             raise InvalidInputError(
                 f"screenshot output must end with .png/.jpg/.jpeg, got {ext!r}")
 
-        # --- B6: screenshot root confinement ---
-        # Resolve and confine the output inside the CWD-based screenshot root
-        # so a caller cannot write to arbitrary paths (e.g. ../../etc/passwd).
-        root = _osp.abspath(os.getcwd())
-        abs_out = _osp.abspath(_osp.normpath(output))
-        if not (abs_out == root or abs_out.startswith(root + _osp.sep)):
+        # --- B4: screenshot root confinement (realpath + commonpath) ---
+        # Resolve both the configured root and the requested output to real
+        # paths so symlink/junction escapes are blocked. The root is a dedicated
+        # screenshot root (defaults to CWD), never an arbitrary trust anchor.
+        root = Path(self.screenshot_root).resolve() if self.screenshot_root \
+            else Path(os.getcwd()).resolve()
+        abs_out = Path(output).resolve()
+        try:
+            abs_out.relative_to(root)
+        except ValueError:
             raise InvalidInputError(
-                f"output path escapes the allowed screenshot root {root}: {output}")
-        if _osp.exists(abs_out) and not overwrite:
-            raise InvalidInputError(f"output already exists (use overwrite=True): {output}")
+                f"output path escapes the allowed screenshot root {root}: "
+                f"{output}")
 
-        out_dir = _osp.dirname(abs_out)
-        if out_dir and not _osp.isdir(out_dir):
+        out_dir = abs_out.parent
+        if out_dir and not out_dir.is_dir():
             try:
-                os.makedirs(out_dir, exist_ok=True)
+                out_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 raise InvalidInputError(f"cannot create output directory: {e}")
 
@@ -902,27 +953,42 @@ class ChromeReader:
             params: Dict[str, Any] = {"format": capture_format}
             if not is_png:
                 params["quality"] = quality
-            result = self.cdp_send(ws, "Page.captureScreenshot", params, timeout=15)
+            result = self.cdp_send(ws, "Page.captureScreenshot", params,
+                                   timeout=min(15, wait))
 
             if "data" in result:
                 img_data = base64.b64decode(result["data"])
-                # --- B6: TOCTOU-safe write (atomic temp + exclusive rename) ---
-                tmp = abs_out + f".{os.getpid()}.tmp"
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                try:
+                out_str = str(abs_out)
+                if overwrite:
+                    # Atomic temp + exclusive-create + rename.
+                    tmp = out_str + f".{os.getpid()}.tmp"
+                    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(img_data)
+                        os.replace(tmp, out_str)
+                    except Exception:
+                        if _osp.exists(tmp):
+                            os.unlink(tmp)
+                        raise
+                else:
+                    # No-replace: create the destination with O_EXCL directly.
+                    # An existing file raises FileExistsError -> InvalidInputError
+                    # (no check-then-create TOCTOU window).
+                    try:
+                        fd = os.open(out_str, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                     0o600)
+                    except FileExistsError:
+                        raise InvalidInputError(
+                            f"output already exists (use overwrite=True): {output}")
                     with os.fdopen(fd, "wb") as f:
                         f.write(img_data)
-                    os.replace(tmp, abs_out)
-                except Exception:
-                    if _osp.exists(tmp):
-                        os.unlink(tmp)
-                    raise
                 meta = {
-                    "path": abs_out,
+                    "path": out_str,
                     "format": capture_format,
                     "byteSize": len(img_data),
                 }
-                return abs_out if return_path else meta
+                return meta if return_metadata else out_str
         finally:
             self._close_tab(ws)
             ws.close()
@@ -974,9 +1040,9 @@ class ChromeReader:
         return self.read("https://www.facebook.com/", wait=wait,
                          selector='[role="main"]', max_chars=max_chars)
 
-    def _get_tab_ws(self, tab_id: str) -> str:
+    def _get_tab_ws(self, tab_id: str, *, timeout: float = 5.0) -> str:
         """Get WebSocket URL for a specific tab."""
-        tabs = self.get_tabs()
+        tabs = self.get_tabs(timeout=timeout)
         for tab in tabs:
             if tab.get("id") == tab_id:
                 return tab.get("webSocketDebuggerUrl", "")

@@ -19,16 +19,20 @@ Covers:
 """
 
 import json
+from collections import deque
 from unittest.mock import Mock
 
 import pytest
+import websocket
 
 from chrome_cdp_reader.bridge import ChromeReader
 from chrome_cdp_reader.errors import (
     ConnectionError,
     EvaluationError,
+    ExtractionError,
     InvalidInputError,
     NavigationTimeoutError,
+    NavigationError,
     TargetError,
 )
 from chrome_cdp_reader.models import TargetHandle
@@ -134,7 +138,7 @@ def _ws(handle):
 def test_prepare_tab_created_target_is_owned_true():
     import json
     reader = ChromeReader()
-    reader._get_json = lambda ep: (
+    reader._get_json = lambda ep, *a, **k: (
         {"Browser": "Chrome/150", "webSocketDebuggerUrl": "ws://b"}
         if ep == "/json/version" else []
     )
@@ -171,7 +175,7 @@ def test_prepare_tab_reused_target_is_owned_false():
     existing = [{"id": "T0", "type": "page", "url": "https://example.com",
                  "webSocketDebuggerUrl": "ws://existing"}]
     reader = ChromeReader()
-    reader._get_json = lambda ep: (
+    reader._get_json = lambda ep, *a, **k: (
         {"Browser": "Chrome/150", "webSocketDebuggerUrl": "ws://b"}
         if ep == "/json/version" else existing
     )
@@ -210,7 +214,7 @@ def test_close_tab_consumes_handle():
 # ===========================================================================
 def _reader_min():
     reader = ChromeReader()
-    reader._get_json = lambda ep: (
+    reader._get_json = lambda ep, *a, **k: (
         {"Browser": "Chrome/150", "webSocketDebuggerUrl": "ws://b"}
         if ep == "/json/version" else []
     )
@@ -376,7 +380,7 @@ def test_screenshot_overwrite_false_refuses_existing():
 def test_screenshot_returns_metadata_dict():
     reader = _screenshot_reader()
     out = reader.screenshot("https://example.com", output="meta.png",
-                            overwrite=True)
+                            overwrite=True, return_metadata=True)
     assert isinstance(out, dict)
     assert out["format"] == "png"
     assert out["byteSize"] > 0
@@ -384,7 +388,172 @@ def test_screenshot_returns_metadata_dict():
 
 def test_screenshot_return_path_legacy():
     reader = _screenshot_reader()
+    # Default (return_metadata=False) preserves the original str return.
     out = reader.screenshot("https://example.com", output="legacy.png",
-                            overwrite=True, return_path=True)
+                            overwrite=True)
     assert isinstance(out, str)
     assert out.endswith("legacy.png")
+
+
+# ===========================================================================
+# Round 4 — deeper regression (deadline budget, method-aware errors,
+# strict lifecycle edge cases, about: scheme, handle immutability)
+# ===========================================================================
+def test_deadline_budgets_helper_timeouts():
+    """With timeout=1, tab lookup / create / connect must be called with a
+    budget no larger than the remaining deadline (never a default large
+    timeout). We patch the post-selection helpers so the test only inspects
+    the budgets passed into create_tab / _get_tab_ws / _connect."""
+    reader = _reader_min()
+    seen = {}
+    ct = []  # captured (helper, timeout) tuples
+    # Track the budget passed to create_tab (and its inner helpers).
+    def fake_create(url, *, timeout=15):
+        seen["create_tab"] = timeout
+        return "T1"
+    reader.create_tab = fake_create
+    reader._get_tab_ws = Mock(side_effect=lambda tid, *, timeout=5: (ct.append(("get_tab_ws", timeout)) or "ws://t"))
+    reader._connect = Mock(side_effect=lambda u, timeout=15: (ct.append(("connect", timeout)) or _ws(None)))
+    reader.cdp_send = Mock(return_value={})
+    reader.cdp_js = Mock(return_value='"complete"')
+    reader._wait_navigation_ready = Mock(return_value=True)
+    reader._wait_ready_state = Mock(return_value=True)
+    reader._get_event_queue = Mock(side_effect=lambda ws: deque())
+
+    reader._prepare_tab("https://example.com", timeout=1)
+    assert seen["create_tab"] is not None
+    assert seen["create_tab"] <= 1.0
+    caps = dict(ct)
+    assert caps["get_tab_ws"] <= 1.0
+    assert caps["connect"] <= 1.0
+
+
+def _scripted_ws_with_response(resp_json: str):
+    class _S:
+        def __init__(self):
+            self._script = [resp_json]
+            self.sent = []
+            self.closed = False
+        def send(self, payload):
+            self.sent.append(json.loads(payload))
+        def settimeout(self, t):
+            pass
+        def recv(self):
+            if self._script:
+                return self._script.pop(0)
+            raise websocket.WebSocketTimeoutException()
+        def close(self):
+            self.closed = True
+    return _S()
+
+
+def test_cdp_error_runtime_evaluate_maps_to_evaluation_error():
+    ws = _scripted_ws_with_response(
+        json.dumps({"id": 1, "error": {"message": "boom"}}))
+    reader = ChromeReader()
+    with pytest.raises(EvaluationError):
+        reader.cdp_send(ws, "Runtime.evaluate", {"expression": "1"}, timeout=5)
+
+
+def test_cdp_error_navigate_maps_to_navigation_error():
+    ws = _scripted_ws_with_response(
+        json.dumps({"id": 1, "error": {"message": "bad"}}))
+    reader = ChromeReader()
+    with pytest.raises(NavigationError):
+        reader.cdp_send(ws, "Page.navigate", {"url": "x"}, timeout=5)
+
+
+def test_cdp_error_create_target_maps_to_target_error():
+    ws = _scripted_ws_with_response(
+        json.dumps({"id": 1, "error": {"message": "no"}}))
+    reader = ChromeReader()
+    with pytest.raises(TargetError):
+        reader.cdp_send(ws, "Target.createTarget", {"url": "x"}, timeout=5)
+
+
+def test_cdp_malformed_response_maps_to_extraction_error():
+    ws = _scripted_ws_with_response("not-json{{")
+    reader = ChromeReader()
+    with pytest.raises(ExtractionError):
+        reader.cdp_send(ws, "Runtime.evaluate", {}, timeout=5)
+
+
+def test_strict_lifecycle_rejects_wrong_loader():
+    from unittest.mock import Mock as _M
+    reader = ChromeReader()
+    ws = _ws(None)
+    queue = deque([{"method": "Page.lifecycleEvent",
+                    "params": {"frameId": "F1", "loaderId": "WRONG",
+                               "name": "load"}}])
+    reader._get_event_queue = Mock(return_value=queue)
+    ws.recv = _M(side_effect=websocket.WebSocketTimeoutException)
+    ready = reader._wait_navigation_ready(ws, "F1", "L1", timeout=1,
+                                           lifecycle_enabled=True)
+    assert ready is False
+
+
+def test_strict_lifecycle_accepts_correct_loader():
+    from unittest.mock import Mock as _M
+    reader = ChromeReader()
+    ws = _ws(None)
+    queue = deque([{"method": "Page.lifecycleEvent",
+                    "params": {"frameId": "F1", "loaderId": "L1",
+                               "name": "load"}}])
+    reader._get_event_queue = Mock(return_value=queue)
+    ws.recv = _M(side_effect=websocket.WebSocketTimeoutException)
+    ready = reader._wait_navigation_ready(ws, "F1", "L1", timeout=1,
+                                           lifecycle_enabled=True)
+    assert ready is True
+
+
+def test_same_document_event_rejected_for_cross_document():
+    from unittest.mock import Mock as _M
+    reader = ChromeReader()
+    ws = _ws(None)
+    queue = deque([{"method": "Page.navigatedWithinDocument",
+                    "params": {"frameId": "F1"}}])
+    reader._get_event_queue = Mock(return_value=queue)
+    ws.recv = _M(side_effect=websocket.WebSocketTimeoutException)
+    ready = reader._wait_navigation_ready(ws, "F1", "L1", timeout=1,
+                                           lifecycle_enabled=True)
+    assert ready is False
+
+
+def test_lifecycle_event_rejected_for_same_document():
+    from unittest.mock import Mock as _M
+    reader = ChromeReader()
+    ws = _ws(None)
+    queue = deque([{"method": "Page.lifecycleEvent",
+                    "params": {"frameId": "F1", "loaderId": "",
+                               "name": "load"}}])
+    reader._get_event_queue = Mock(return_value=queue)
+    ws.recv = _M(side_effect=websocket.WebSocketTimeoutException)
+    ready = reader._wait_navigation_ready(ws, "F1", None, timeout=1,
+                                           lifecycle_enabled=True)
+    assert ready is False
+
+
+def test_validate_scheme_rejects_other_about_urls():
+    for bad in ("about:settings", "about:version", "about:blank/x", "about:"):
+        with pytest.raises(InvalidInputError):
+            validate_scheme(bad)
+    assert validate_scheme("about:blank") == "about"
+
+
+def test_close_tab_uses_captured_handle_not_mutated():
+    reader = ChromeReader()
+    reader.get_tabs = Mock(return_value=[{"id": "T1", "type": "page", "url": "x"}])
+    reader.cdp_send = Mock(return_value={})
+    reader._target_exists = Mock(return_value=False)
+    handle = TargetHandle(target_id="T1", owned=True)
+    ws = _ws(handle)
+    ws._handle = TargetHandle(target_id="SOME_OTHER", owned=False)
+    assert reader._close_tab(ws, handle=handle) is True
+
+
+def test_close_tab_rejects_wrong_handle_type():
+    reader = ChromeReader()
+    ws = Mock()
+    ws._handle = {"target_id": "T1", "owned": True}
+    assert reader._close_tab(ws) is False
+

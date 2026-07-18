@@ -65,7 +65,7 @@ def _make_reader(ws, create_target_id="T1", tab_ws="ws://tab", existing_tabs=Non
     """
     reader = ChromeReader()
 
-    def fake_get_json(endpoint):
+    def fake_get_json(endpoint, *args, **kwargs):
         if endpoint == "/json/version":
             return {"Browser": "Chrome/150", "webSocketDebuggerUrl": "ws://browser"}
         if endpoint == "/json/list":
@@ -241,7 +241,7 @@ def test_screenshot_uses_prepare_tab():
         return base(s, method, params, timeout)
     reader.cdp_send = fake_send
     out = reader.screenshot("https://example.com", output="shot_test.png",
-                            wait=5, overwrite=True)
+                            wait=5, overwrite=True, return_metadata=True)
     navs = [m.get("method") for m in ws.sent if m.get("method") == "Page.navigate"]
     assert navs == ["Page.navigate"]
     assert out["path"].endswith(".png")
@@ -282,7 +282,7 @@ def test_ws_closed_on_prepare_exception():
     def boom(s, method, params=None, timeout=10):
         raise CDPError(f"boom on {method}")
     reader = ChromeReader()
-    reader._get_json = lambda ep: (
+    reader._get_json = lambda ep, *a, **k: (
         {"Browser": "Chrome/150", "webSocketDebuggerUrl": "ws://browser"}
         if ep == "/json/version" else []
     )

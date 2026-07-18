@@ -131,7 +131,8 @@ def screenshot(url: str, output: str, wait: int, quality: int, overwrite: bool):
 
     try:
         result = reader.screenshot(url, output=output, wait=wait,
-                                   quality=quality, overwrite=overwrite)
+                                   quality=quality, overwrite=overwrite,
+                                   return_metadata=True)
         click.echo(f"Screenshot saved to: {result['path']}")
         click.echo(f"  format={result['format']} bytes={result['byteSize']}")
     except Exception as e:

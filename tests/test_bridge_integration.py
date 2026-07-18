@@ -87,7 +87,8 @@ def test_screenshot_creates_parent_dir(tmp_path):
 
     # navigate/enable are no-ops for our patched path; use a tiny timeout.
     result = r.screenshot(
-        "https://example.com", output=out, wait=1, overwrite=True
+        "https://example.com", output=out, wait=1, overwrite=True,
+        return_metadata=True,
     )
     assert result["format"] == "png"
     import os
