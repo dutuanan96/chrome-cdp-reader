@@ -42,8 +42,9 @@ def test_read_static_page():
 
 def test_screenshot_png_is_real_png(tmp_path):
     reader = ChromeReader(CDP)
-    out = str(tmp_path / "shot.png")
-    saved = reader.screenshot("https://example.com", output=out, wait=6)
+    # Output must stay inside the CWD root (screenshot root confinement).
+    out = "shot.png"
+    saved = reader.screenshot("https://example.com", output=out, wait=6, overwrite=True)
     assert saved["format"] == "png"
     assert os.path.exists(saved["path"])
     with open(saved["path"], "rb") as f:
@@ -53,8 +54,8 @@ def test_screenshot_png_is_real_png(tmp_path):
 
 def test_screenshot_jpg_is_real_jpeg(tmp_path):
     reader = ChromeReader(CDP)
-    out = str(tmp_path / "shot.jpg")
-    saved = reader.screenshot("https://example.com/", output=out, wait=10)
+    out = "shot.jpg"
+    saved = reader.screenshot("https://example.com/", output=out, wait=10, overwrite=True)
     assert saved["format"] == "jpeg"
     assert os.path.exists(saved["path"])
     with open(saved["path"], "rb") as f:

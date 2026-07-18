@@ -55,6 +55,17 @@ def validate_scheme(url: str) -> str:
             raise InvalidInputError("url must include an explicit http(s) scheme")
         raise InvalidInputError(f"scheme '{scheme}:' is not supported")
 
+    # http(s) require a real hostname (not just "http://" or "http:///x").
+    if scheme in ("http", "https"):
+        host = (parsed.hostname or "").strip()
+        if not host:
+            raise InvalidInputError(
+                f"{scheme} URL must include a valid hostname: {url!r}")
+        # Reject lone-dot / empty-after-strip placeholders.
+        if host in (".", "..") or not any(c.isalnum() for c in host):
+            raise InvalidInputError(
+                f"{scheme} URL has an invalid hostname: {url!r}")
+
     # Reject embedded credentials (http://user:pass@host) per policy.
     if parsed.username is not None or parsed.password is not None:
         raise InvalidInputError("urls with embedded credentials are not allowed")

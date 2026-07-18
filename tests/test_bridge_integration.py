@@ -72,9 +72,8 @@ def test_screenshot_rejects_existing_file_without_overwrite(tmp_path):
 
 def test_screenshot_creates_parent_dir(tmp_path):
     r = ChromeReader()
-    out = tmp_path / "nested" / "dir" / "shot.png"
-    # We only check the directory creation + validation path; captureScreenshot
-    # would fail without a real browser, so we monkeypatch it.
+    # Output must stay inside the CWD root (screenshot root confinement).
+    out = "nested/dir/shot.png"
     import base64
     payload = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
 
@@ -88,10 +87,11 @@ def test_screenshot_creates_parent_dir(tmp_path):
 
     # navigate/enable are no-ops for our patched path; use a tiny timeout.
     result = r.screenshot(
-        "https://example.com", output=str(out), wait=1, overwrite=True
+        "https://example.com", output=out, wait=1, overwrite=True
     )
     assert result["format"] == "png"
-    assert out.exists()
+    import os
+    assert os.path.exists(out)
 
 
 # --- Blocker 3: B3 bounded text is wired into read() --------------------

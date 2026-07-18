@@ -20,9 +20,13 @@ def _reader_with_tabs(tabs):
 
 
 def _ws(target_id=None, owns=True):
+    from chrome_cdp_reader.models import TargetHandle
     ws = Mock()
-    ws._target_id = target_id
-    ws._owns_target = owns
+    if target_id is None:
+        # Explicitly no handle metadata (getattr must return None, not a Mock).
+        ws._handle = None
+        return ws
+    ws._handle = TargetHandle(target_id=target_id, owned=owns)
     return ws
 
 

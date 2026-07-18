@@ -29,7 +29,8 @@ def cli():
     "--wait", "-w", type=click.IntRange(min=1), default=15, show_default=True,
     help="Maximum seconds to wait for page readiness",
 )
-@click.option("--max-chars", default=4000, help="Max characters of text to print")
+@click.option("--max-chars", default=4000, type=click.IntRange(min=1),
+              show_default=True, help="Max characters of text to extract (bounded inside the browser)")
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON instead of formatted text")
 def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
     """
@@ -64,27 +65,30 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
             validate_scheme(target)
 
         if target.lower() == "gmail":
-            result = reader.read_gmail(search=search, wait=wait)
+            result = reader.read_gmail(search=search, wait=wait, max_chars=max_chars)
         elif target.lower() == "zalo":
-            result = reader.read_zalo(wait=wait)
+            result = reader.read_zalo(wait=wait, max_chars=max_chars)
         elif target.lower() == "facebook":
-            result = reader.read_facebook(wait=wait)
+            result = reader.read_facebook(wait=wait, max_chars=max_chars)
         else:
-            result = reader.read(target, wait=wait)
+            result = reader.read(target, wait=wait, max_chars=max_chars)
 
         if as_json:
             click.echo(json.dumps(result, ensure_ascii=False, indent=2))
             return
-
         # Display results
+        text = result.get('text', 'No content')
+        text_length = result.get('textLength', len(text))
+        truncated = result.get('truncated', False)
         click.echo(f"\nTitle: {result.get('title', 'N/A')}")
         click.echo(f"URL: {result.get('url', 'N/A')}")
-        click.echo("\nContent:")
+        click.echo("")
+        click.echo("Content:")
         click.echo("-" * 50)
-        text = result.get('text', 'No content')
-        if len(text) > max_chars:
-            text = text[:max_chars] + f"\n... [truncated, {len(text)} chars total]"
-        click.echo(text)
+        if truncated:
+            click.echo(f"{text}\n... [truncated, {text_length} chars total]")
+        else:
+            click.echo(text)
 
         if result.get('links'):
             click.echo(f"\nLinks ({len(result['links'])}):")
