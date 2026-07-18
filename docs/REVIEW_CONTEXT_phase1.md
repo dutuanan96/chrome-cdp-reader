@@ -1,8 +1,9 @@
 # REVIEW CONTEXT — Gate 0 + Phase 1 (chrome-cdp-reader)
 
 **Generated:** 2026-07-18 by Hermes (CDP agent)
-**Updated:** 2026-07-18 (Round 4 — deadline E2E, method-aware errors, strict
-lifecycle edge cases, about:blank-only, screenshot no-replace + backward compat)
+**Updated:** 2026-07-18 (Round 5 — failure-path fixes finalised: shared
+Deadline in create_tab, method-aware cdp_send timeout + send failure, protocol-
+aware lifecycle fallback via UnsupportedMethodError(-32601), metadata synced)
 **For:** Codex / Antigravity / ChatGPT review of PR #9
 **Repo:** https://github.com/dutuanan96/chrome-cdp-reader
 
@@ -60,10 +61,11 @@ reviewer must check are preserved:
 ### Current SHAs
 - PR #8 base/merge: `e09443b` (baseline) → merge `d8d64733…`
 - PR #9 base: `d8d64733…` (post #8)
-- PR #9 head (Round 5): `aa0b70099fb516468c4c5b5986934dfc51615d1a` — produced after
-  fixing the 3 Round-5 failure-path blockers (create_tab shared Deadline,
-  method-aware cdp_send timeout + send failure, lifecycle fallback only on
-  protocol-unsupported) plus deterministic regression tests.
+- PR #9 head (Round 5): `6a5c44acb302323e06057f6ec75960e700c87439` — produced after
+  finalising the 3 Round-5 failure-path blockers (create_tab shared Deadline,
+  method-aware cdp_send timeout + send failure, protocol-aware lifecycle
+  fallback via UnsupportedMethodError(-32601)) plus deterministic regression
+  tests, with all metadata synced.
 
 ### Round 3 (all 6 blockers fixed)
 1. **B1 CLI bounded read end-to-end** — `cli.read` forwards `max_chars` to
@@ -135,12 +137,13 @@ reviewer must check are preserved:
    its handle as `TargetHandle` and rejects non-`TargetHandle` metadata. A test
    mutates `ws._handle` after capture yet cleanup still uses the original
    captured handle.
-7. **Docs updated last.** PR #9 head SHA, Round 3/Round 4 labels, 132 passed /
-   4 skipped / 2 deselected, CHANGELOG (deadline, TOCTOU, backward compat), and
-   the PR description (still the Round-2 draft) are refreshed.
+7. **Docs updated last.** PR #9 head SHA, Round 3/Round 4/Round 5 labels,
+  **147 passed / 4 skipped / 2 deselected**, CHANGELOG (deadline, TOCTOU,
+  backward compat, protocol-aware fallback), and the PR description are
+  refreshed.
 
 ### CI status
-- `pytest -q -m "not live"` → **132 passed, 4 live skipped, 2 deselected** on
+- `pytest -q -m "not live"` → **147 passed, 4 live skipped, 2 deselected** on
   Python 3.10 / 3.11 / 3.12 / 3.13.
 - Ruff clean (`ruff check src/ tests/`).
 - Live tests (`@pytest.mark.live`) are excluded from the default matrix and run
@@ -226,7 +229,7 @@ without changing runtime behaviour for valid inputs.
 ### 3.5 Quality gates (current)
 
 - `ruff check src/ tests/` → clean
-- `pytest -q -m "not live"` → **102 passed, 4 live skipped, 2 deselected** (live
+- `pytest -q -m "not live"` → **147 passed, 4 live skipped, 2 deselected** (live
   tests skip when Chrome debug is not reachable; the 2 deselected are the
   `@pytest.mark.live` Gmail-reuse / generic-close integration tests)
 - CI: green on Python 3.10 / 3.11 / 3.12 / 3.13
@@ -289,13 +292,16 @@ the failure paths (not covered by success smoke):
    `Target.createTarget`/`attachToTarget`/`closeTarget`/`Page.close`→
    `TargetError`; other methods→`EvaluationError`. No more blanket
    `NavigationTimeoutError`. `test_cdp_send_*_timeout_is_*` cover each.
-3. **Lifecycle fallback only on protocol-unsupported.** The
+3. **Lifecycle fallback only on protocol -32601.** The
    `Page.setLifecycleEventsEnabled` failure used `except Exception` and silently
-   fell back for ANY error (timeout, socket drop, malformed response). Now it
-   falls back ONLY when the error text confirms the command is unsupported;
-   `ConnectionError`/`NavigationTimeoutError`/`ExtractionError`/unexpected all
-   propagate. `test_lifecycle_fallback_on_unsupported_protocol` (fallback) and
-   `test_lifecycle_propagation_on_*` (socket/timeout/malformed) cover both.
+   fell back for ANY error (timeout, socket drop, malformed response), then
+   guessed via free-text ("not supported"). Now `cdp_send` maps CDP error code
+   `-32601` to a typed `UnsupportedMethodError` (carrying the code); `_prepare_tab`
+   falls back to `loadEventFired` ONLY on that typed error. `ConnectionError`/
+   `NavigationTimeoutError`/`ExtractionError`/unexpected (incl. any other code
+   like -32000) all propagate. `test_lifecycle_fallback_on_unsupported_protocol`
+   (fallback keys on the code, not the text) and `test_lifecycle_propagation_on_*`
+   (socket/timeout/malformed) cover both.
 
 ---
 
@@ -351,6 +357,6 @@ crc read javascript:alert(1)   # expect rejected, exit 2
 
 ## 8. Pending human actions
 
-- [ ] Anh (An An) or another AI reviews PR #9 (Round 2)
+- [ ] Anh (An An) or another AI reviews PR #9 (Round 5 / final approval)
 - [ ] Merge only after review (do NOT self-merge per plan rule 16.5)
 - [ ] After merge → Phase 2 branch `feat/compact-snapshot`

@@ -62,16 +62,30 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 - Package facade (`__init__.py`) now exports the typed errors, `Deadline`,
   `TargetHandle`, `validate_scheme`, and `exit_code_for`.
 
+### Round 5 / R6 (failure-path hardening, final)
+- `errors.py` adds `UnsupportedMethodError` carrying the CDP `code`
+  (default `-32601`). `EXIT_CODES` maps it to `23`.
+- `cdp_send()` maps a CDP error with `code == -32601` to
+  `UnsupportedMethodError` (preserving the code) instead of a generic error;
+  all other error/timeout paths stay method-aware.
+- `_prepare_tab()` now falls back to `loadEventFired` ONLY when
+  `Page.setLifecycleEventsEnabled` raises `UnsupportedMethodError` (protocol
+  `-32601`). The previous free-text matching (`"not supported"` /
+  `"unknown method"` / `"command is not"`) is removed; `ConnectionError`,
+  timeout, `ExtractionError`, and any other error code all propagate.
+
 ### Changed
 - Unknown internal errors exit with code `70` via `exit_code_for()` for every
   exception caught in the CLI (both `read` and `screenshot`).
 
 ### Tests
 - New `tests/test_round3.py` covering all blocker regressions across Round 2,
-  Round 3, and Round 4 (deadline budget, method-aware CDP errors triggered by
-  real malformed/error responses, strict lifecycle edge cases, about-scheme
-  rejection, handle immutability).
+  Round 3, Round 4, and Round 5 (shared Deadline budget, method-aware CDP
+  errors + timeouts triggered by real responses/recv-timeouts, `-32601` →
+  `UnsupportedMethodError` with code preserved, same message different code
+  propagates, strict lifecycle edge cases, about-scheme rejection, handle
+  immutability, lifecycle fallback keys on the protocol code not text).
 - `tests/test_load_lifecycle.py` rewritten for strict correlation + typed
   errors.
-- Non-live suite: **132 passed, 4 live skipped, 2 `@pytest.mark.live`
+- Non-live suite: **147 passed, 4 live skipped, 2 `@pytest.mark.live`
   deselected** on Python 3.10–3.13.
