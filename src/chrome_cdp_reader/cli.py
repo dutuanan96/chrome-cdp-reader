@@ -29,7 +29,8 @@ def cli():
     "--wait", "-w", type=click.IntRange(min=1), default=15, show_default=True,
     help="Maximum seconds to wait for page readiness",
 )
-@click.option("--max-chars", default=4000, help="Max characters of text to print")
+@click.option("--max-chars", default=4000, type=click.IntRange(min=1),
+              show_default=True, help="Max characters of text to extract (bounded inside the browser)")
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON instead of formatted text")
 def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
     """
@@ -42,6 +43,8 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
     - "facebook" - Read Facebook
     """
     from chrome_cdp_reader.bridge import ChromeReader
+    from chrome_cdp_reader.errors import ConnectionError, exit_code_for
+    from chrome_cdp_reader.url_validation import validate_scheme
 
     reader = ChromeReader()
 
@@ -50,34 +53,42 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
         click.echo("Error: Cannot connect to Chrome.", err=True)
         click.echo("Make sure Chrome is running with --remote-debugging-port=9222", err=True)
         click.echo("Run: crc setup", err=True)
-        sys.exit(1)
+        sys.exit(exit_code_for(ConnectionError("not connected")))
 
     if not as_json:
         click.echo(f"Reading {target}...", err=True)
 
     try:
+        # Phase 1: validate target URL scheme BEFORE any navigation.
+        # Site aliases (gmail/zalo/facebook) bypass scheme validation.
+        if target.lower() not in ("gmail", "zalo", "facebook"):
+            validate_scheme(target)
+
         if target.lower() == "gmail":
-            result = reader.read_gmail(search=search, wait=wait)
+            result = reader.read_gmail(search=search, wait=wait, max_chars=max_chars)
         elif target.lower() == "zalo":
-            result = reader.read_zalo(wait=wait)
+            result = reader.read_zalo(wait=wait, max_chars=max_chars)
         elif target.lower() == "facebook":
-            result = reader.read_facebook(wait=wait)
+            result = reader.read_facebook(wait=wait, max_chars=max_chars)
         else:
-            result = reader.read(target, wait=wait)
+            result = reader.read(target, wait=wait, max_chars=max_chars)
 
         if as_json:
             click.echo(json.dumps(result, ensure_ascii=False, indent=2))
             return
-
         # Display results
+        text = result.get('text', 'No content')
+        text_length = result.get('textLength', len(text))
+        truncated = result.get('truncated', False)
         click.echo(f"\nTitle: {result.get('title', 'N/A')}")
         click.echo(f"URL: {result.get('url', 'N/A')}")
-        click.echo("\nContent:")
+        click.echo("")
+        click.echo("Content:")
         click.echo("-" * 50)
-        text = result.get('text', 'No content')
-        if len(text) > max_chars:
-            text = text[:max_chars] + f"\n... [truncated, {len(text)} chars total]"
-        click.echo(text)
+        if truncated:
+            click.echo(f"{text}\n... [truncated, {text_length} chars total]")
+        else:
+            click.echo(text)
 
         if result.get('links'):
             click.echo(f"\nLinks ({len(result['links'])}):")
@@ -86,36 +97,48 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        from chrome_cdp_reader.errors import exit_code_for
+        sys.exit(exit_code_for(e))
 
 
 @cli.command()
 @click.argument("url")
-@click.option("--output", "-o", default="screenshot.png", help="Output file path")
+@click.option("--output", "-o", default="screenshot.png", help="Output file path (.png/.jpg/.jpeg)")
 @click.option(
     "--wait", "-w", type=click.IntRange(min=1), default=15, show_default=True,
     help="Maximum seconds to wait for page readiness",
 )
-def screenshot(url: str, output: str, wait: int):
+@click.option("--quality", "-q", type=click.IntRange(min=1, max=100), default=80,
+              show_default=True, help="JPEG quality (1-100)")
+@click.option("--overwrite", is_flag=True, help="Allow overwriting an existing output file")
+def screenshot(url: str, output: str, wait: int, quality: int, overwrite: bool):
     """
     Take a screenshot of a URL.
     """
     from chrome_cdp_reader.bridge import ChromeReader
+    from chrome_cdp_reader.errors import (
+        ConnectionError,
+        exit_code_for,
+    )
 
     reader = ChromeReader()
 
     if not reader.is_connected():
         click.echo("Error: Cannot connect to Chrome.", err=True)
-        sys.exit(1)
+        sys.exit(exit_code_for(ConnectionError("not connected")))
 
     click.echo(f"Taking screenshot of {url}...")
 
     try:
-        result = reader.screenshot(url, output=output, wait=wait)
-        click.echo(f"Screenshot saved to: {result}")
+        result = reader.screenshot(url, output=output, wait=wait,
+                                   quality=quality, overwrite=overwrite,
+                                   return_metadata=True)
+        click.echo(f"Screenshot saved to: {result['path']}")
+        click.echo(f"  format={result['format']} bytes={result['byteSize']}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        from chrome_cdp_reader.errors import exit_code_for
+        sys.exit(exit_code_for(e))
 
 
 @cli.command()

@@ -16,5 +16,33 @@ __author__ = "dutuanan96"
 from chrome_cdp_reader.bridge import ChromeReader, CDPError, TabNotFoundError
 from chrome_cdp_reader.cookie_manager import CookieManager
 from chrome_cdp_reader.chrome_launcher import ChromeLauncher
+from chrome_cdp_reader.errors import (
+    ChromeCDPReaderError,
+    ConnectionError,
+    PortConflictError,
+    UnsafeProcessError,
+    NavigationError,
+    NavigationTimeoutError,
+    DownloadNavigationError,
+    TargetError,
+    EvaluationError,
+    PolicyDeniedError,
+    InvalidInputError,
+    ExtractionError,
+    UnsupportedMethodError,
+    exit_code_for,
+)
+from chrome_cdp_reader.deadlines import Deadline
+from chrome_cdp_reader.models import TargetHandle
+from chrome_cdp_reader.url_validation import validate_scheme
 
-__all__ = ["ChromeReader", "CDPError", "TabNotFoundError", "CookieManager", "ChromeLauncher"]
+__all__ = [
+    "ChromeReader", "CDPError", "TabNotFoundError",
+    "CookieManager", "ChromeLauncher",
+    "ChromeCDPReaderError",
+    "ConnectionError", "PortConflictError", "UnsafeProcessError",
+    "NavigationError", "NavigationTimeoutError", "DownloadNavigationError",
+    "TargetError", "EvaluationError", "PolicyDeniedError",
+    "InvalidInputError", "ExtractionError", "UnsupportedMethodError", "exit_code_for",
+    "Deadline", "TargetHandle", "validate_scheme",
+]
