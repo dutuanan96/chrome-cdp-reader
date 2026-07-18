@@ -93,12 +93,8 @@ def read(target: str, search: str, wait: int, max_chars: int, as_json: bool):
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
-        from chrome_cdp_reader.errors import (
-            ChromeCDPReaderError,
-            exit_code_for,
-        )
-        code = exit_code_for(e) if isinstance(e, ChromeCDPReaderError) else 1
-        sys.exit(code)
+        from chrome_cdp_reader.errors import exit_code_for
+        sys.exit(exit_code_for(e))
 
 
 @cli.command()
@@ -117,7 +113,6 @@ def screenshot(url: str, output: str, wait: int, quality: int, overwrite: bool):
     """
     from chrome_cdp_reader.bridge import ChromeReader
     from chrome_cdp_reader.errors import (
-        ChromeCDPReaderError,
         ConnectionError,
         exit_code_for,
     )
@@ -137,8 +132,8 @@ def screenshot(url: str, output: str, wait: int, quality: int, overwrite: bool):
         click.echo(f"  format={result['format']} bytes={result['byteSize']}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
-        code = exit_code_for(e) if isinstance(e, ChromeCDPReaderError) else 1
-        sys.exit(code)
+        from chrome_cdp_reader.errors import exit_code_for
+        sys.exit(exit_code_for(e))
 
 
 @cli.command()
